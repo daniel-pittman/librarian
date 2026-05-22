@@ -1,0 +1,168 @@
+meta:
+  description: Synthetic activity corpus for the librarian test suite.
+  note: Every entry below is fictional. No real person or organization.
+
+activities:
+  - id: 2024-03-intro-security-course
+    date: '2024-03-01'
+    end_date: '2024-05-15'
+    title: Taught Introduction to Information Security
+    description: |
+      Delivered the spring section of the introductory information security
+      course. Redesigned three lab modules and added a hands-on capstone.
+      See related write-up in `2024-06-security-curriculum-report`.
+    ptr:
+      category: teaching
+      subcategory: instructional-delivery
+      notes: Counts as teaching delivery for the review period.
+    cpe:
+      group: primary
+      credits: 20
+      domain: Security Education
+      submitted: true
+      submission_date: '2024-06-01'
+      notes: Course preparation qualifies for primary-group credit.
+    docs:
+      - 'https://example.edu/courses/infosec-101'
+      - 'file:syllabus-infosec-101'
+    tags:
+      - teaching
+      - cpe-primary
+      - course
+
+  - id: 2024-06-security-curriculum-report
+    date: '2024-06-10'
+    title: Authored Security Curriculum Review Report
+    description: |
+      Wrote an internal report reviewing the security curriculum and
+      recommending a revised course sequence. Builds on the course work in
+      `2024-03-intro-security-course`.
+    ptr:
+      category: scholarly
+      subcategory: cat3-other
+      notes: A non-peer-reviewed scholarly output.
+    docs:
+      - 'file:curriculum-report-2024'
+    tags:
+      - scholarly
+      - report
+      - curriculum
+
+  - id: 2025-02-conference-talk
+    date: '2025-02-20'
+    title: Presented at the Regional Computing Conference
+    description: |
+      Gave a 30-minute conference talk on secure software design patterns.
+      A reviewer named Jordan Avery (javery@example.org) coordinated the
+      session. Attendance also counted as professional development.
+    ptr:
+      category: scholarly
+      subcategory: cat2-presentation
+      notes: A peer-reviewed conference presentation.
+    cpe:
+      group: general
+      credits: 8
+      domain: Software Security
+      submitted: false
+      submission_date: null
+      notes: Conference attendance, general-group credit.
+    docs:
+      - 'https://example.org/regional-computing-2025/program'
+    tags:
+      - scholarly
+      - conference
+      - presentation
+
+  - id: 2025-04-journal-article
+    date: '2025-04-05'
+    title: Published Peer-Reviewed Journal Article
+    description: |
+      Co-authored a peer-reviewed journal article on intrusion-detection
+      evaluation methodology. Primary author was a graduate student; this
+      entry credits the faculty advising role explicitly.
+    ptr:
+      category: scholarly
+      subcategory: cat1-peer-reviewed
+      notes: A category-1 peer-reviewed publication; faculty advisor role.
+    docs:
+      - 'https://doi.example.org/10.0000/synthetic.2025.0405'
+    tags:
+      - scholarly
+      - publication
+      - student-output
+
+  - id: 2025-09-committee-service
+    date: '2025-09-01'
+    end_date: '2026-05-31'
+    title: Served on the Curriculum Review Committee
+    description: |
+      Year-long appointment to the department curriculum review committee.
+      Contributed a proposal to restructure the security elective track.
+    ptr:
+      category: service
+      subcategory: institutional-university
+      notes: Institutional service for the review period.
+    docs:
+      - 'https://example.edu/committees/curriculum-review'
+    tags:
+      - service
+      - committee
+
+  - id: 2026-01-security-workshop
+    date: '2026-01-15'
+    title: Ran a Hands-On Security Workshop
+    description: |
+      Facilitated a one-day hands-on workshop on threat modeling for early
+      career professionals. Logistics handled by Sam Rivera (srivera@example.net).
+    ptr:
+      category: teaching
+      subcategory: advising
+      notes: Mentoring-oriented teaching activity.
+    cpe:
+      group: primary
+      credits: 6
+      domain: Threat Modeling
+      submitted: false
+      submission_date: null
+      notes: Workshop delivery, primary-group credit.
+    docs:
+      - 'https://example.net/threat-modeling-workshop'
+    tags:
+      - teaching
+      - workshop
+      - cpe-primary
+
+  - id: 2026-03-external-review
+    date: '2026-03-10'
+    title: Served as External Program Reviewer
+    description: |
+      Acted as an external reviewer for another institution's security
+      program. This references a deleted entry on purpose: see
+      `2099-99-nonexistent-entry` which should be flagged as dangling.
+    ptr:
+      category: service
+      subcategory: external-professional
+      notes: External professional service.
+    docs:
+      - 'https://example.edu/external-review-2026'
+    tags:
+      - service
+      - peer-review
+
+  - id: 2026-04-self-study
+    date: '2026-04-01'
+    title: Completed a Self-Study Security Course
+    description: |
+      Finished a self-paced online course on cloud security architecture.
+    cpe:
+      group: general
+      credits: 12
+      domain: Cloud Security
+      submitted: true
+      submission_date: '2026-04-20'
+      notes: Self-study, general-group credit. No review classification.
+    docs:
+      - 'https://example.com/cloud-security-course'
+    tags:
+      - cpe-general
+      - self-study

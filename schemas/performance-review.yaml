@@ -1,0 +1,79 @@
+# =============================================================================
+# Schema: Employee Performance Review / Brag Document
+# =============================================================================
+# For any employee keeping a running record of accomplishments, goals, impact,
+# and demonstrated competencies — the "brag document" pattern. When the annual
+# review or promotion-packet deadline arrives, you already have a structured,
+# searchable record instead of a blank page and a fading memory.
+#
+# To activate: copy this file to <data-home>/schema.yaml (or set
+# LIBRARIAN_SCHEMA_PATH).
+# -----------------------------------------------------------------------------
+
+name: Employee Performance Review
+description: >-
+  Log accomplishments, goals, impact, and competencies for an annual
+  performance review or promotion packet (the "brag document" pattern).
+
+blocks:
+  # The "review" block. An entry that carries it is review-relevant work.
+  review:
+    label: Performance Review
+    fields:
+      # What kind of review item this is.
+      - name: kind
+        type: enum
+        required: true
+        values:
+          - accomplishment   # something completed / delivered
+          - goal             # an objective, in progress or planned
+          - impact           # a measurable outcome or business result
+          - growth           # skill development / learning
+          - feedback         # recognition or constructive input received
+
+      # The competency this item demonstrates. Adapt the enum to your
+      # employer's competency framework / career ladder.
+      - name: competency
+        type: enum
+        depends_on: kind
+        values:
+          accomplishment:
+            - delivery-execution
+            - technical-craft
+            - collaboration
+            - leadership
+            - communication
+          goal:
+            - delivery-execution
+            - technical-craft
+            - collaboration
+            - leadership
+            - communication
+          impact:
+            - business-outcome
+            - customer-outcome
+            - team-outcome
+            - efficiency
+          growth:
+            - new-skill
+            - mentorship
+            - certification
+            - process-improvement
+          feedback:
+            - recognition
+            - peer-feedback
+            - manager-feedback
+
+      # The scope of the work's reach — how widely the impact was felt.
+      - name: scope
+        type: enum
+        values: [self, team, department, organization, external]
+
+      # The review period this item belongs to (free text, e.g. "2026-H1",
+      # "FY26-Q3"). Lets you slice the record by review cycle.
+      - name: review_period
+        type: string
+
+      # Free-text rationale: the story, the metrics, the "so what".
+      - name: notes
+        type: text

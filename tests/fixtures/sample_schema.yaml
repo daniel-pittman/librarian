@@ -1,0 +1,42 @@
+# Test fixture schema — exercises both a post-tenure-review block and a
+# continuing-education-credit block in one schema, plus every field type the
+# engine supports (enum, dependent enum, text, string, int, bool, date, date?).
+name: Test — Review + Credits
+description: Synthetic schema for the librarian test suite.
+
+blocks:
+  ptr:
+    label: Post-Tenure Review
+    fields:
+      - name: category
+        type: enum
+        required: true
+        values: [teaching, scholarly, service]
+      - name: subcategory
+        type: enum
+        depends_on: category
+        values:
+          teaching: [instructional-delivery, advising, pedagogy-research]
+          scholarly: [cat1-peer-reviewed, cat2-presentation, cat3-other]
+          service: [institutional-university, external-professional]
+      - name: notes
+        type: text
+
+  cpe:
+    label: Continuing Education Credit
+    fields:
+      - name: group
+        type: enum
+        required: true
+        values: [primary, general]
+      - name: credits
+        type: int
+        required: true
+      - name: domain
+        type: string
+      - name: submitted
+        type: bool
+      - name: submission_date
+        type: date?
+      - name: notes
+        type: text

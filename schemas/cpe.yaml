@@ -1,0 +1,59 @@
+# =============================================================================
+# Schema: Certification Continuing-Education Credits (CPE)
+# =============================================================================
+# Track continuing-education credits for a professional certification. This is
+# written generically so it suits ANY credit-tracked certification — CISSP
+# CPEs, PMP PDUs, CompTIA CEUs, nursing CEUs, and so on. No single certifying
+# body is hardcoded; `activity_type`, `domain`, and `group` are free-text or
+# generic enums you adapt to your certification's rules.
+#
+# To activate: copy this file to <data-home>/schema.yaml (or set
+# LIBRARIAN_SCHEMA_PATH). To track BOTH review and credits at once, merge the
+# `cpe` block below into ptr.yaml under a single `blocks:` mapping.
+# -----------------------------------------------------------------------------
+
+name: Certification Continuing Education
+description: >-
+  Track continuing-education credits earned toward a professional
+  certification's renewal cycle.
+
+blocks:
+  # The "cpe" block. An entry that carries it earned renewal credit.
+  cpe:
+    label: Continuing Education Credit
+    fields:
+      # Credit grouping. Many certifications split credits into a primary
+      # group (directly related to the certification's domain) and a broader
+      # professional-development group. Two generic buckets cover the common
+      # case; rename or extend the enum to match your certification.
+      - name: group
+        type: enum
+        required: true
+        values: [primary, general]
+
+      # The number of credits earned. Stored as an integer; `stats` totals it.
+      - name: credits
+        type: int
+        required: true
+
+      # The knowledge domain the activity maps to (free text — e.g. a CISSP
+      # domain name, a PMP talent-triangle area, a nursing practice area).
+      - name: domain
+        type: string
+
+      # The certifying body's activity-type label for this credit (free text —
+      # e.g. "self-study", "conference attendance", "course completion").
+      - name: activity_type
+        type: string
+
+      # Whether the credit has been submitted to the certifying body's portal.
+      - name: submitted
+        type: bool
+
+      # The date the credit was submitted. Nullable: empty until submission.
+      - name: submission_date
+        type: date?
+
+      # Free-text rationale: how this activity qualifies for credit.
+      - name: notes
+        type: text

@@ -1,0 +1,56 @@
+# =============================================================================
+# Schema: Academic Post-Tenure Review (PTR)
+# =============================================================================
+# Track teaching, scholarly, and service work for an academic post-tenure
+# review or a promotion case. This is the librarian's default schema — it is
+# copied to <data-home>/schema.yaml on first run unless one is already present.
+#
+# To use a different schema, copy one of the other files in this directory to
+# <data-home>/schema.yaml, or point LIBRARIAN_SCHEMA_PATH at it.
+# -----------------------------------------------------------------------------
+
+name: Academic Post-Tenure Review
+description: >-
+  Track teaching, scholarly, and service work for an academic post-tenure
+  review or promotion packet.
+
+blocks:
+  # The single "ptr" block. An entry that carries it is classified for review.
+  ptr:
+    label: Post-Tenure Review
+    fields:
+      # The top-level review area. A plain enum: every value is always valid.
+      - name: category
+        type: enum
+        required: true
+        values: [teaching, scholarly, service]
+
+      # The sub-classification. This is a CATEGORY-DEPENDENT enum: which values
+      # are legal depends on the sibling `category` field. The validator and
+      # the update-nested-field command both resolve the dependency.
+      - name: subcategory
+        type: enum
+        depends_on: category
+        values:
+          teaching:
+            - instructional-delivery
+            - instructional-design
+            - content-expertise
+            - advising
+            - student-success
+            - pedagogy-research
+            - professional-development
+          scholarly:
+            - cat1-peer-reviewed
+            - cat2-presentation
+            - cat3-other
+            - external-funding
+          service:
+            - institutional-university
+            - institutional-department
+            - external-professional
+            - external-community
+
+      # Free-text rationale: WHY this entry counts toward the review.
+      - name: notes
+        type: text

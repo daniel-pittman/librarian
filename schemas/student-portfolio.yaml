@@ -1,0 +1,53 @@
+# =============================================================================
+# Schema: Student Portfolio
+# =============================================================================
+# For a student tracking coursework, projects, research, and activities for
+# grad-school applications, scholarship applications, or job applications.
+# Keep a running record across your whole program so that, when an application
+# deadline arrives, you can assemble a tailored portfolio from real evidence.
+#
+# To activate: copy this file to <data-home>/schema.yaml (or set
+# LIBRARIAN_SCHEMA_PATH).
+# -----------------------------------------------------------------------------
+
+name: Student Portfolio
+description: >-
+  Track coursework, projects, research, and activities for grad-school,
+  scholarship, and job applications.
+
+blocks:
+  # The "portfolio" block. An entry that carries it is portfolio-relevant.
+  portfolio:
+    label: Student Portfolio
+    fields:
+      # The kind of portfolio item.
+      - name: activity_type
+        type: enum
+        required: true
+        values:
+          - coursework       # a course taken, or notable course project
+          - project          # a personal or team project
+          - research         # research experience / publication / poster
+          - extracurricular  # clubs, competitions, volunteering, leadership
+          - award            # scholarship, honor, recognition
+
+      # The standing of the item — used to filter "what is done" vs. "ongoing".
+      - name: status
+        type: enum
+        values: [planned, in-progress, completed]
+
+      # The academic term the item belongs to (free text, e.g. "Fall 2026",
+      # "2026-Spring"). Lets you build a chronological transcript-style view.
+      - name: term
+        type: string
+
+      # Skills or courses demonstrated, as a comma-separated string. Kept as a
+      # single string (not a list) so it stays a simple line-level edit; split
+      # on commas when you need the individual items.
+      - name: skills
+        type: string
+
+      # Free-text rationale: what you did, what you learned, the outcome —
+      # the raw material an application essay or resume bullet draws from.
+      - name: notes
+        type: text

@@ -1,0 +1,29 @@
+# Synthetic file inventory for the librarian test suite.
+#
+# Paths are relative to the inventory root. The test harness sets
+# LIBRARIAN_ROOT to the fixtures directory, so `artifacts/<name>` resolves to
+# tests/fixtures/artifacts/<name>. Two of these files are referenced by
+# entries via `file:<id>` docs; `standalone-profile` is intentionally
+# unreferenced (a legitimate standalone-artifact state).
+files:
+  - id: syllabus-infosec-101
+    path: artifacts/syllabus-infosec-101.txt
+    category: Teaching
+    title: Introduction to Information Security — Syllabus
+    description: Course syllabus artifact for the spring infosec section.
+    sha256: 9b47d1ec74ce6fdc1ca19671d2089786c2571cd5588e2aef465bbde79f8ab90e
+    added: '2024-03-02'
+  - id: curriculum-report-2024
+    path: artifacts/curriculum-report-2024.txt
+    category: Scholarship
+    title: Security Curriculum Review Report
+    description: The internal curriculum review report artifact.
+    sha256: 136efd7b6a37cab71ad6b184fef71222ed904bbcaeff0aa7a426927555a9d977
+    added: '2024-06-10'
+  - id: standalone-profile
+    path: artifacts/standalone-profile.txt
+    category: Professional Profile
+    title: Standalone Professional Profile Artifact
+    description: A standalone artifact not tied to any activity entry.
+    sha256: 730442e1231a92ff2d532a9ec2865e4195a426f0217efeb16ca9b38fb16dc1b0
+    added: '2026-01-05'
