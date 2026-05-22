@@ -2,11 +2,12 @@
 # Schema: Academic Post-Tenure Review (PTR)
 # =============================================================================
 # Track teaching, scholarly, and service work for an academic post-tenure
-# review or a promotion case. This is the librarian's default schema — it is
-# copied to <data-home>/schema.yaml on first run unless one is already present.
+# review or a promotion case.
 #
-# To use a different schema, copy one of the other files in this directory to
-# <data-home>/schema.yaml, or point LIBRARIAN_SCHEMA_PATH at it.
+# librarian runs schema-less by default — no schema is installed automatically.
+# To use this schema, copy this file to <data-home>/schema.yaml, or point
+# LIBRARIAN_SCHEMA_PATH at it. The other files in this directory are
+# alternative schemas; use whichever fits your reporting need.
 # -----------------------------------------------------------------------------
 
 name: Academic Post-Tenure Review

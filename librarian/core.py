@@ -187,7 +187,7 @@ def tag_kernel(tag: str) -> str:
 # Backtick-wrapped tokens shaped like an entry id. Captured broadly, then
 # filtered: an id-shaped token is one that is a valid slug AND contains a digit
 # (entry ids in practice always carry a date component or a numeric tail), so a
-# backticked tag such as `c3-lab-output` or a code term like `connect-src` is
+# backticked tag such as `peer-reviewed` or a code term like `connect-src` is
 # not mistaken for an entry reference.
 _BACKTICKED_RE = re.compile(r"`([a-z0-9][a-z0-9-]+[a-z0-9])`")
 _HAS_DIGIT_RE = re.compile(r"\d")
