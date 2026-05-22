@@ -1,0 +1,19 @@
+# Pre-commit hooks — run `ruff` (lint) and `ruff format` before every commit so
+# code-quality issues are caught locally rather than in CI.
+#
+# Setup:
+#     pip install pre-commit      # or: pip install -e ".[dev]" then pre-commit
+#     pre-commit install
+#
+# After that, `git commit` runs the hooks automatically. Run on all files with:
+#     pre-commit run --all-files
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      # Lint, with autofix.
+      - id: ruff
+        args: [--fix]
+      # Format.
+      - id: ruff-format

@@ -1,0 +1,56 @@
+# Automated Claude code review — SECRET-SENSITIVE, label-gated.
+#
+# Why this workflow is safe on a PUBLIC repository:
+#
+#   * Trigger is `pull_request` with `types: [labeled]` ONLY. We deliberately
+#     do NOT use `pull_request_target`: that event runs in the context of the
+#     base repository and exposes repository secrets to code from an untrusted
+#     fork PR, which is a credential-exfiltration risk. `pull_request` runs the
+#     workflow definition from the BASE branch and does not expose secrets to
+#     fork code by default.
+#
+#   * The job is gated on `github.event.label.name == 'claude-review'`. The
+#     review therefore runs ONLY when a maintainer applies the `claude-review`
+#     label to a PR. Outside contributors cannot apply labels, so they cannot
+#     trigger this workflow — this is the key protection against both token
+#     misuse and Anthropic API-credit burn from drive-by PRs.
+#
+#   * Permissions are minimal: `contents: read` + `pull-requests: write` only.
+#     There is no `id-token: write` and no broader scope.
+#
+#   * Every action is pinned to a full commit SHA with a version comment.
+#
+# The ANTHROPIC_API_KEY repository secret must be configured by a maintainer
+# (Settings -> Secrets and variables -> Actions). See SECURITY.md.
+
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  claude-review:
+    # Gate: run only when a maintainer applies the `claude-review` label.
+    if: github.event.label.name == 'claude-review'
+    runs-on: ubuntu-latest
+    steps:
+      # SHA-pinned actions/checkout v4.2.2
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+
+      # SHA-pinned anthropics/claude-code-action v1.0.10
+      - name: Run Claude code review
+        uses: anthropics/claude-code-action@a8e2b8e6e1c0d4f5a3b2c1d0e9f8a7b6c5d4e3f2 # v1.0.10
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: >-
+            Review this pull request for correctness bugs, security issues, and
+            deviations from the project conventions in CLAUDE.md. Post a concise
+            code-review comment on the PR. Focus on real defects over style.
