@@ -462,7 +462,10 @@ def librarian_delete(entry_id: str, session_label: str, confirm: bool = False) -
 
 @mcp.tool()
 def librarian_rename_id(old_id: str, new_id: str, session_label: str) -> str:
-    """Rename an entry id, repointing backticked cross-references."""
+    """Rename an entry id, repointing every cross-reference to the old id --
+    both backticked and plain-text -- in descriptions and notes. Matches are
+    bounded by id-character lookarounds, so a rename of ``ongoing-coi`` will
+    not touch ``ongoing-coi-training``."""
     label = _validate_label(session_label)
     return _out(
         _run_cli(["rename-id", old_id, new_id], extra_env={"LIBRARIAN_SESSION_LABEL": label})

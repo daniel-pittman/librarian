@@ -111,6 +111,17 @@ Every entry needs: `id` (a stable `YYYY-MM-<slug>` identifier), `date`,
 `docs`. Optional: `end_date` for multi-day/ongoing items, plus any schema
 block.
 
+### 7. Fixing a wrong id
+
+Treat ids as stable — a title change never warrants an id change. When an id
+is genuinely *wrong* (e.g. wrong year, or the entry turns out to document a
+different event), use `rename-id`: it changes the entry's `id` AND repoints
+every cross-reference to the old id — backticked (`` `old-id` ``) and
+plain-text — in other entries' descriptions and notes. Matches are bounded by
+id-character lookarounds, so a rename of `ongoing-coi` will not touch
+`ongoing-coi-training`. Do NOT delete+recreate to fix an id; that loses the
+cross-reference repointing.
+
 ## The file inventory
 
 Supporting artifact files (PDFs, posters, decks, certificates) are tracked in a

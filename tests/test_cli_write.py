@@ -447,6 +447,37 @@ def test_rename_id_repoints_backtick_refs(sandbox):
     assert "`2024-03-intro-security-course`" not in desc
 
 
+def test_rename_id_repoints_plain_text_refs(sandbox):
+    """rename-id repoints plain-text cross-references, not just backticked ones."""
+    # Inject a plain-text mention of the target id into another entry's ptr.notes.
+    sandbox.run(
+        "update-notes",
+        "2025-02-conference-talk",
+        stdin="See 2024-03-intro-security-course for the underlying coursework.",
+    )
+    out, _, rc = sandbox.run("rename-id", "2024-03-intro-security-course", "2024-03-renamed-course")
+    assert rc == 0
+    notes = sandbox.entry("2025-02-conference-talk")["ptr"]["notes"]
+    assert "2024-03-renamed-course" in notes
+    assert "2024-03-intro-security-course" not in notes
+
+
+def test_rename_id_respects_token_boundaries(sandbox):
+    """A rename must not touch a longer id-shaped string that begins with the
+    old id. This is the safety property that makes plain-text repointing OK."""
+    sentinel = "2024-03-intro-security-course-extension"
+    sandbox.run(
+        "update-notes",
+        "2025-02-conference-talk",
+        stdin=f"See {sentinel} for an unrelated follow-on.",
+    )
+    out, _, rc = sandbox.run("rename-id", "2024-03-intro-security-course", "2024-03-renamed-course")
+    assert rc == 0
+    notes = sandbox.entry("2025-02-conference-talk")["ptr"]["notes"]
+    # The longer id-shaped sentinel must be left untouched.
+    assert sentinel in notes, f"longer id-shaped string was modified: {notes!r}"
+
+
 def test_rename_id_rejects_existing(sandbox):
     """rename-id refuses a target id that already exists."""
     out, _, rc = sandbox.run("rename-id", "2026-04-self-study", "2025-02-conference-talk")

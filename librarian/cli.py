@@ -1476,7 +1476,13 @@ def cmd_remove_docs(ctx: Context, args: list[str]) -> int:
 
 
 def cmd_rename_id(ctx: Context, args: list[str]) -> int:
-    """Rename an entry id and repoint backticked cross-references. ``rename-id <old> <new>``"""
+    """Rename an entry id and repoint cross-references. ``rename-id <old> <new>``
+
+    Repoints every cross-reference to the old id -- backticked or plain-text --
+    in descriptions and notes. Matches are bounded by id-character lookarounds,
+    so an id is only rewritten when it appears as a whole token (a rename of
+    ``ongoing-coi`` leaves ``ongoing-coi-training`` untouched).
+    """
     import re
 
     label = _resolve_label(args, required=True)
@@ -1507,15 +1513,20 @@ def cmd_rename_id(ctx: Context, args: list[str]) -> int:
     indent = " " * line_indent(lines[start])
     lines[start] = f"{indent}- id: {new_id}\n"
 
-    old_tok, new_tok = f"`{old_id}`", f"`{new_id}`"
+    # Repoint every cross-reference to the old id, bounded by id-character
+    # lookarounds. This catches both backticked refs (``old-id``) and plain-
+    # text mentions in prose, while leaving longer id-shaped strings that
+    # happen to start with the old id untouched.
+    pattern = re.compile(rf"(?<![a-z0-9-]){re.escape(old_id)}(?![a-z0-9-])")
     repointed = 0
     for i, line in enumerate(lines):
-        if old_tok in line:
-            repointed += line.count(old_tok)
-            lines[i] = line.replace(old_tok, new_tok)
+        new_line, n = pattern.subn(new_id, line)
+        if n:
+            repointed += n
+            lines[i] = new_line
     write_lines(ctx.paths.activities, lines)
     append_ledger(ctx.paths.ledger, "rename-id", new_id, label, f"from={old_id} refs={repointed}")
-    print(f"Renamed '{old_id}' -> '{new_id}' ({repointed} backtick reference(s) repointed)")
+    print(f"Renamed '{old_id}' -> '{new_id}' ({repointed} cross-reference(s) repointed)")
     return 0
 
 
