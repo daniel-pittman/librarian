@@ -221,11 +221,36 @@ exposed as MCP resources (opt-in; there is no default).
 
 ## The bundled agent template
 
-`agents/librarian.md` is a generic, reusable AI-agent definition — drop it into
-your assistant's agent configuration to get sensible behavior on top of the raw
-tools: search-before-create, schema-aware classification, consistent tagging,
-audit-labeled writes, and accurate attribution. Adapt the project-specific
-notes to your situation.
+`agents/librarian.md` is a **generic, reusable AI-agent definition template** —
+drop it into your assistant's agent configuration to get sensible behavior on
+top of the raw tools: search-before-create, schema-aware classification,
+consistent tagging, audit-labeled writes, and accurate attribution.
+
+For Claude Code, copy it to `~/.claude/agents/librarian.md` (user-scope, so it
+is available to every Claude Code session on your machine):
+
+```sh
+cp agents/librarian.md ~/.claude/agents/librarian.md
+```
+
+> ⚠️ **Customize before relying on it.** The template ships intentionally
+> generic — it has no project-specific judgment until you add it. After
+> copying it, edit your local copy to fill in:
+>
+> - **Your active schema** — which schema you selected (e.g. `ptr`, `cpe`,
+>   `performance-review`, `student-portfolio`) and what its blocks mean for
+>   your reporting context.
+> - **Your tagging conventions** — the projects, people, and topics you tag
+>   for, and their canonical forms (lowercase-hyphenated, TitleCase-Hyphenated,
+>   etc.).
+> - **Project-specific notes** — anything an agent should know about your
+>   record-keeping situation (preferred labels, what is in vs. out of scope
+>   for you, recurring collaborators).
+>
+> Generic-as-shipped, the agent is a competent operator of the tool but not a
+> curator of *your* record. Customization takes around 15 minutes and is the
+> difference between an agent that logs entries blindly and one that behaves
+> like a thoughtful collaborator.
 
 ## Data location
 

@@ -9,10 +9,23 @@ description: >-
 
 # Librarian — Activity-Tracking Agent
 
-This is a **generic, reusable template**. It describes how to operate the
-`librarian` tool against any activity database. Copy it into your own agent
-configuration and adapt the project-specific notes (which schema is active,
-your tagging conventions) to your situation.
+> ⚠️ **This is a generic template. Customize before relying on it.**
+>
+> The template describes how to operate the `librarian` tool against any
+> activity database, but it has no project-specific judgment until you add it.
+> After copying it into your agent configuration (for Claude Code:
+> `~/.claude/agents/librarian.md`), edit your copy to fill in:
+>
+> - **Your active schema** — which schema you selected and what its blocks
+>   mean for your reporting context.
+> - **Your tagging conventions** — the projects, people, and topics you tag,
+>   and their canonical forms.
+> - **Project-specific notes** — anything an agent should know about your
+>   record-keeping situation (preferred labels, what is in vs. out of scope
+>   for you, recurring collaborators).
+>
+> Without customization the agent is a competent operator of the tool, but
+> not a curator of *your* record.
 
 ## What the database is for
 
