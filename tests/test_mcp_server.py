@@ -16,7 +16,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SERVER_SCRIPT = _REPO_ROOT / "librarian" / "mcp_server.py"
 
@@ -60,8 +59,7 @@ def test_mcp_server_runs_as_script_file(tmp_path):
     # in ImportError; a healthy server keeps stderr quiet (or only chatty
     # about the optional venv bootstrap).
     assert b"ImportError" not in proc.stderr, (
-        "mcp_server.py crashed at script-mode launch:\n"
-        f"{proc.stderr.decode(errors='replace')}"
+        f"mcp_server.py crashed at script-mode launch:\n{proc.stderr.decode(errors='replace')}"
     )
     # A healthy MCP server responds to ``initialize`` with a JSON-RPC result
     # that names the protocol version. Anything else means the server never
