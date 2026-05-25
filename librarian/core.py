@@ -194,7 +194,10 @@ _HAS_DIGIT_RE = re.compile(r"\d")
 
 
 def scan_dangling_refs(
-    activities: list[dict], ids: set[str], text_fields: list[tuple[str, list[str]]]
+    activities: list[dict],
+    ids: set[str],
+    text_fields: list[tuple[str, list[str]]],
+    exclude: set[str] | None = None,
 ) -> list[tuple[str, str, str]]:
     """Find backticked, id-shaped cross-references that do not resolve.
 
@@ -204,11 +207,18 @@ def scan_dangling_refs(
         text_fields: A list of ``(label, path)`` pairs naming the text fields
             to scan. ``path`` is a list of keys: ``["description"]`` for a
             top-level field, ``["ptr", "notes"]`` for a nested one.
+        exclude: A set of names that may look entry-id-shaped but are NOT
+            entry references (typically: tags in use anywhere in the corpus,
+            and file-inventory ids). The scanner's id-shape heuristic
+            (slug + digit) over-matches on these and would otherwise produce
+            false positives like a backticked tag name. Suppressing them
+            here keeps real dangling refs from getting buried in noise.
 
     Returns:
-        ``(source_id, dangling_target, field_label)`` tuples. Self-references
-        and references that resolve are not reported.
+        ``(source_id, dangling_target, field_label)`` tuples. Self-references,
+        references that resolve, and excluded names are not reported.
     """
+    exclude = exclude or set()
     findings: list[tuple[str, str, str]] = []
     for entry in activities:
         eid = entry.get("id") or "?"
@@ -220,6 +230,9 @@ def scan_dangling_refs(
                 ref = match.group(1)
                 # Must look like an id (carry a digit) and not be a self-ref.
                 if not _HAS_DIGIT_RE.search(ref) or ref == eid:
+                    continue
+                # Skip names known to NOT be entry ids (tags, file ids).
+                if ref in exclude:
                     continue
                 if ref not in ids:
                     findings.append((eid, ref, label))

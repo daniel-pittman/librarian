@@ -456,17 +456,35 @@ def cmd_validate(ctx: Context, args: list[str]) -> int:
             for issue in validate_block(block, entry.get(block.name) or {}):
                 issues.append(f"{issue.split(':', 1)[0]}: {eid} — {issue.split(':', 1)[1].strip()}")
 
+    # File-inventory records (loaded once and reused for both the dangling-ref
+    # exclude set and the file-inventory integrity checks below).
+    records = load_files(ctx.paths.files)
+    inventory_ids = {r.get("id") for r in records if r.get("id")}
+
+    # Build the exclude set for the dangling-ref scanner: any backticked token
+    # that matches a tag-in-use or a file-inventory id is NOT a dangling entry
+    # reference and should be suppressed (would otherwise produce false
+    # positives -- a `c3-lab-output` tag mention, a `<file-id>` mention, etc.).
+    tags_in_use: set[str] = set()
+    for entry in activities:
+        for tag in entry.get("tags") or []:
+            if isinstance(tag, str):
+                tags_in_use.add(tag)
+
     # Dangling cross-references across core + schema text fields.
-    for src, target, field in scan_dangling_refs(activities, ids, ctx.text_ref_fields):
+    for src, target, field in scan_dangling_refs(
+        activities,
+        ids,
+        ctx.text_ref_fields,
+        exclude=tags_in_use | inventory_ids,
+    ):
         issues.append(f"DANGLING REF: {src} -> '{target}' (in {field})")
 
-    # File-inventory integrity.
-    records = load_files(ctx.paths.files)
+    # File-inventory integrity. (records + inventory_ids were loaded above.)
     for record in records:
         fpath = record.get("path", "")
         if not fpath or not (ctx.paths.root / fpath).exists():
             issues.append(f"MISSING FILE: {record.get('id', '?')} -> '{fpath}'")
-    inventory_ids = {r.get("id") for r in records}
     for entry in activities:
         eid = entry.get("id", "?")
         for doc in entry.get("docs", []) or []:

@@ -219,6 +219,39 @@ audit attribution). Point your MCP-capable client at that command to register
 it. If you set `LIBRARIAN_MEMORY_DIR`, the directory's Markdown files are also
 exposed as MCP resources (opt-in; there is no default).
 
+### Registering with Claude Code (`~/.claude.json`)
+
+The canonical way to launch the server is as a Python module
+(`python -m librarian.mcp_server`); launching it by file path also works (a
+`__package__` shim in the script handles it), but the module form is preferred.
+For Claude Code, add this entry under `mcpServers.librarian` in
+`~/.claude.json`, substituting your own paths:
+
+```json
+{
+  "type": "stdio",
+  "command": "/absolute/path/to/librarian/.venv/bin/python",
+  "args": ["-m", "librarian.mcp_server"],
+  "env": {
+    "LIBRARIAN_YAML_PATH":   "/absolute/path/to/activities.yaml",
+    "LIBRARIAN_FILES_PATH":  "/absolute/path/to/files.yaml",
+    "LIBRARIAN_LEDGER_PATH": "/absolute/path/to/changes.log",
+    "LIBRARIAN_ROOT":        "/absolute/path/to/data-root",
+    "LIBRARIAN_SCHEMA_PATH": "/absolute/path/to/schema.yaml"
+  }
+}
+```
+
+Every `LIBRARIAN_*` env var is optional; omit it to fall back to the XDG
+default (`~/.config/librarian/...`). The env block is the right place to point
+the OSS server at an existing data home — e.g. a YAML you already track in a
+private directory — without copying the file. `LIBRARIAN_ROOT` is the base
+against which inventory file paths (the `path:` field on each `files.yaml`
+record) are resolved.
+
+Restart Claude Code after editing `~/.claude.json` so the MCP server is
+re-spawned with the new config.
+
 ## The bundled agent template
 
 `agents/librarian.md` is a **generic, reusable AI-agent definition template** —
