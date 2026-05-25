@@ -57,9 +57,7 @@ def test_scan_dangling_refs_excludes_tags():
     assert ("2024-02-mentions", "c3-lab-output", "description") in findings
 
     # With exclude: the tag is suppressed.
-    findings = scan_dangling_refs(
-        activities, ids=ids, text_fields=_DESC, exclude={"c3-lab-output"}
-    )
+    findings = scan_dangling_refs(activities, ids=ids, text_fields=_DESC, exclude={"c3-lab-output"})
     assert findings == []
 
 
@@ -81,9 +79,7 @@ def test_scan_dangling_refs_excludes_file_inventory_ids():
     assert findings, "expected a (false) finding without exclusion"
 
     # With exclude: file-inventory id is suppressed.
-    findings = scan_dangling_refs(
-        activities, ids=ids, text_fields=_DESC, exclude=inventory
-    )
+    findings = scan_dangling_refs(activities, ids=ids, text_fields=_DESC, exclude=inventory)
     assert findings == []
 
 
