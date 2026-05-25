@@ -109,6 +109,15 @@ def _bootstrap_venv() -> None:
 # Only bootstrap when run as a script; importing the module (e.g. in tests)
 # should not trigger a venv build or a re-exec.
 if __name__ == "__main__":
+    # When invoked by file path (``python path/to/mcp_server.py``) instead of
+    # as a module (``python -m librarian.mcp_server``), Python leaves
+    # ``__package__`` empty, and the relative imports below crash with
+    # ``ImportError: attempted relative import with no known parent package``.
+    # Repair the package context here -- before any relative import runs --
+    # so both invocation styles work.
+    if not __package__:
+        sys.path.insert(0, str(_REPO_ROOT))
+        __package__ = "librarian"
     _bootstrap_venv()
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
