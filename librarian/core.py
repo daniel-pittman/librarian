@@ -186,9 +186,11 @@ def tag_kernel(tag: str) -> str:
 
 # Backtick-wrapped tokens shaped like an entry id. Captured broadly, then
 # filtered: an id-shaped token is one that is a valid slug AND contains a digit
-# (entry ids in practice always carry a date component or a numeric tail), so a
-# backticked tag such as `peer-reviewed` or a code term like `connect-src` is
-# not mistaken for an entry reference.
+# (entry ids in practice always carry a date component or a numeric tail) AND
+# contains at least one hyphen (entry ids are multi-token slugs; this excludes
+# hex-only tokens like backticked git commit SHAs that would otherwise look
+# id-shaped). Backticked tags such as `peer-reviewed`, code terms like
+# `connect-src`, and SHAs like `ce153c8` are not mistaken for entry references.
 _BACKTICKED_RE = re.compile(r"`([a-z0-9][a-z0-9-]+[a-z0-9])`")
 _HAS_DIGIT_RE = re.compile(r"\d")
 
@@ -228,8 +230,11 @@ def scan_dangling_refs(
                 continue
             for match in _BACKTICKED_RE.finditer(text):
                 ref = match.group(1)
-                # Must look like an id (carry a digit) and not be a self-ref.
-                if not _HAS_DIGIT_RE.search(ref) or ref == eid:
+                # Must look like an id (multi-token slug with a digit) and not
+                # be a self-ref. Requiring a hyphen excludes hex-only tokens
+                # like git commit SHAs that would otherwise pass the slug+digit
+                # filter and produce false positives.
+                if "-" not in ref or not _HAS_DIGIT_RE.search(ref) or ref == eid:
                     continue
                 # Skip names known to NOT be entry ids (tags, file ids).
                 if ref in exclude:

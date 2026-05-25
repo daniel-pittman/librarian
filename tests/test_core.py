@@ -106,3 +106,22 @@ def test_scan_dangling_refs_still_catches_real_dangling_when_excluding():
     # The tag and the resolved entry are not flagged; the genuinely broken
     # reference IS still flagged. That is the key safety property.
     assert findings == [("2024-01-mixed", "2099-99-missing", "description")]
+
+
+def test_scan_dangling_refs_skips_hex_tokens_without_hyphens():
+    """Hex-only tokens like git commit SHAs (`ce153c8`, `df4c80f`) pass the
+    slug+digit filter but are not entry references. Requiring a hyphen
+    excludes them: real entry ids are multi-token slugs and always have at
+    least one hyphen."""
+    activities = [
+        _entry(
+            "2024-01-refactor",
+            description=(
+                "Behavior change landed in commits `ce153c8` and `df4c80f`."
+            ),
+        ),
+    ]
+    findings = scan_dangling_refs(
+        activities, ids={"2024-01-refactor"}, text_fields=_DESC
+    )
+    assert findings == [], f"hex tokens were incorrectly flagged: {findings}"
