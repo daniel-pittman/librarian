@@ -116,12 +116,8 @@ def test_scan_dangling_refs_skips_hex_tokens_without_hyphens():
     activities = [
         _entry(
             "2024-01-refactor",
-            description=(
-                "Behavior change landed in commits `ce153c8` and `df4c80f`."
-            ),
+            description=("Behavior change landed in commits `ce153c8` and `df4c80f`."),
         ),
     ]
-    findings = scan_dangling_refs(
-        activities, ids={"2024-01-refactor"}, text_fields=_DESC
-    )
+    findings = scan_dangling_refs(activities, ids={"2024-01-refactor"}, text_fields=_DESC)
     assert findings == [], f"hex tokens were incorrectly flagged: {findings}"
