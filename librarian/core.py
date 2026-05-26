@@ -268,6 +268,44 @@ _NAME_PARTICLES = frozenset(
 )
 # Honorifics that may precede a name.
 _NAME_TITLES = frozenset({"Dr", "Dr.", "Mr", "Mr.", "Ms", "Ms.", "Mrs", "Mrs.", "Prof", "Prof."})
+# Generational / ordinal name suffixes that look acronym-shaped (all-caps,
+# length >= 2) but legitimately belong on the end of a name. Excluded from
+# the post-loop all-caps strip so ``Bob Smith III`` keeps the ``III``.
+# Note: ``Jr``/``Jr.``/``Sr``/``Sr.`` happen to survive the post-loop strip
+# on their own (the lowercase ``r`` breaks the all-upper check), but they
+# belong in this set for consistency and robustness against future
+# refactoring of the strip condition.
+_NAME_SUFFIXES = frozenset(
+    {
+        "II",
+        "III",
+        "IV",
+        "V",
+        "VI",
+        "VII",
+        "VIII",
+        "IX",
+        "X",
+        "XI",
+        "XII",
+        "Jr",
+        "Jr.",
+        "Sr",
+        "Sr.",
+        # All-caps degree / credential suffixes. The lowercase-letter
+        # forms (PhD, MSc, BSc) survive the all-upper check on their
+        # own; these all-caps forms need the allowlist to preserve them.
+        "MD",
+        "MA",
+        "BA",
+        "MS",
+        "BS",
+        "JD",
+        "MBA",
+        "DDS",
+        "DVM",
+    }
+)
 # Capitalised role nouns that should stop a name walk-back.
 _ROLE_STOP_WORDS = frozenset(
     {
@@ -393,19 +431,38 @@ def _walk_back_for_name(text: str, email_start: int) -> str:
     for token in reversed(tokens):
         if token.endswith(";"):
             cleaned = token.rstrip(";").strip(",;:")
+            # A bare `;` token (whitespace on both sides → cleaned is
+            # empty) is always a hard clause boundary regardless of
+            # whether name_parts is empty. Without this, the walk-back
+            # would silently sweep across the boundary.
+            if not cleaned:
+                break
             # Have we collected any real-name material (a token with at
             # least one lowercase letter) on this side of the boundary?
             if any(has_lowercase(p) for p in name_parts):
                 # Yes — respect the boundary. Stop without consuming.
                 break
-            # No — whatever we've collected is suspect (acronym-shaped).
-            # Discard it and look past the boundary for the real name.
+            # No real-name material yet. Three sub-cases for the boundary
+            # token's `cleaned` form:
+            if has_lowercase(cleaned):
+                if _is_name_token(cleaned, is_last_name=True):
+                    # Real name word terminating its own clause
+                    # (e.g. "Smith;"). Discard the suspect tokens we
+                    # collected, consume the cleaned remainder, continue
+                    # walking back for preceding name words.
+                    name_parts.clear()
+                    name_parts.append(cleaned)
+                    continue
+                # Lowercase but NOT a name token — it's a role stop-word
+                # (Director, Manager, Lead) or a particle. The `;` is a
+                # real boundary; respect it rather than skip-continue,
+                # which would silently sweep the prior clause's name
+                # tokens and misattribute them to this email.
+                break
+            # cleaned is all-caps (institutional acronym in trailing
+            # position). Skip without consuming and continue walking back
+            # to find the real name behind it.
             name_parts.clear()
-            if cleaned and has_lowercase(cleaned) and _is_name_token(cleaned, is_last_name=True):
-                # The boundary token itself is the real name's last word.
-                name_parts.append(cleaned)
-            # Else: the boundary token is also suspect (or empty). Skip
-            # it and let the walk-back continue past it.
             continue
         is_last_name = not name_parts
         if not _is_name_token(token, is_last_name=is_last_name):
@@ -416,10 +473,17 @@ def _walk_back_for_name(text: str, email_start: int) -> str:
     # of length ≥2 — these are multi-token trailing affiliations that the
     # boundary skip didn't catch (because they didn't carry the `;`
     # themselves). Length-1 tokens preserved so single-letter initials
-    # without trailing punctuation don't get stripped.
+    # without trailing punctuation don't get stripped; tokens in
+    # ``_NAME_SUFFIXES`` (Roman numeral generational suffixes) are
+    # preserved so ``Bob Smith III`` keeps the ``III``. The
+    # ``len ≥ 2`` guard is also load-bearing for the empty-string edge
+    # case: ``all(ch.isalpha() and ch.isupper() for ch in "")`` is
+    # vacuously True, so without the guard a phantom empty token would
+    # loop forever.
     while (
         name_parts
         and len(name_parts[0]) >= 2
+        and name_parts[0] not in _NAME_SUFFIXES
         and all(ch.isalpha() and ch.isupper() for ch in name_parts[0])
     ):
         name_parts.pop(0)

@@ -282,3 +282,74 @@ def test_extract_contacts_strips_multi_token_trailing_affiliation():
     # Neither all-caps token may leak.
     assert "ZX" not in " ".join(contacts["bob@example.com"]["names"])
     assert "YZ" not in " ".join(contacts["bob@example.com"]["names"])
+
+
+def test_extract_contacts_does_not_misattribute_when_role_word_terminates_clause():
+    """Regression for the role-stop-word boundary leak. When a `;` token
+    has a cleaned form that's a role word (``Director``, ``Manager``,
+    ``Lead``) — lowercase letters present but rejected by
+    ``_is_name_token`` because it's in ``_ROLE_STOP_WORDS`` — the
+    boundary must be respected, not skip-continued. Otherwise the
+    walk-back sweeps the prior clause's name tokens and wrongly
+    attributes them to this email.
+
+    The property under test: **a `;`-terminated role word is a real
+    clause boundary; the walk-back must not cross it and misattribute
+    the prior clause's name**."""
+    activities = [
+        _entry(
+            "2026-05-role-stop-word-boundary",
+            description="Carol Lee Director; (bob@example.com) emailed us",
+        ),
+    ]
+    contacts = extract_contacts(activities)
+    # Either bob@example.com has no entry (correct: we have no name for
+    # bob, the prior clause described Carol Lee), or it's present but
+    # NOT named "Carol Lee" (which would be misattribution).
+    if "bob@example.com" in contacts:
+        assert "Carol Lee" not in contacts["bob@example.com"]["names"], (
+            "Carol Lee is the PRIOR clause's name, must not be misattributed"
+        )
+        assert "Carol Lee Director" not in contacts["bob@example.com"]["names"]
+
+
+def test_extract_contacts_bare_semicolon_token_is_hard_boundary():
+    """Regression for the bare-`;` cross-clause leak. A `;` surrounded by
+    whitespace (``"... word ; word ..."``) tokenizes as a standalone
+    ``;`` whose cleaned form is empty. The walk-back must treat empty-
+    cleaned `;` tokens as a hard boundary, otherwise it falls through
+    and silently sweeps the preceding clause's tokens.
+
+    Real-world prevalence: typographical convention puts a space before
+    `;` in many style guides; LaTeX bibliographies and CMS authoring
+    tools also produce this whitespace pattern."""
+    activities = [
+        _entry(
+            "2026-05-bare-semicolon-token",
+            description="Alice Garcia Bob Smith ; (bob@example.com) at the workshop",
+        ),
+    ]
+    contacts = extract_contacts(activities)
+    # The bare `;` must stop the walk-back. Either bob@example.com has
+    # no entry, or it does NOT carry the prior clause's content
+    # ("Alice Garcia Bob Smith").
+    if "bob@example.com" in contacts:
+        assert "Alice Garcia Bob Smith" not in contacts["bob@example.com"]["names"]
+        assert "Alice Garcia" not in contacts["bob@example.com"]["names"]
+
+
+def test_extract_contacts_preserves_roman_numeral_name_suffix():
+    """Regression for the Roman-numeral-suffix-stripping bug introduced
+    by the post-loop all-caps strip. Generational suffixes like ``III``,
+    ``IV`` look acronym-shaped (all-alpha + all-upper + length >= 2)
+    but legitimately belong on a name. The ``_NAME_SUFFIXES`` allowlist
+    excludes them from the strip."""
+    activities = [
+        _entry(
+            "2026-05-roman-numeral-suffix",
+            description="Bob Smith III (bob@example.com) reviewed the draft",
+        ),
+    ]
+    contacts = extract_contacts(activities)
+    assert "bob@example.com" in contacts
+    assert contacts["bob@example.com"]["names"] == {"Bob Smith III"}
