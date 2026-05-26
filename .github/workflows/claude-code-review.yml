@@ -1,4 +1,9 @@
-# Automated Claude code review — SECRET-SENSITIVE, label-gated.
+# Automated Claude code review on labeled PRs.
+#
+# This workflow uses the OAuth-bound CLAUDE_CODE_OAUTH_TOKEN (provisioned by
+# `claude /install-github-app` from a local Claude Code session) rather than a
+# metered API key, so the review draws against a Claude subscription rather
+# than billing per-run.
 #
 # Why this workflow is safe on a PUBLIC repository:
 #
@@ -10,18 +15,21 @@
 #     fork code by default.
 #
 #   * The job is gated on `github.event.label.name == 'claude-review'`. The
-#     review therefore runs ONLY when a maintainer applies the `claude-review`
-#     label to a PR. Outside contributors cannot apply labels, so they cannot
-#     trigger this workflow — this is the key protection against both token
-#     misuse and Anthropic API-credit burn from drive-by PRs.
+#     review runs ONLY when a maintainer applies the `claude-review` label.
+#     Outside contributors cannot apply labels, so they cannot trigger this
+#     workflow — this is the key protection against subscription-quota burn
+#     from drive-by PRs.
 #
-#   * Permissions are minimal: `contents: read` + `pull-requests: write` only.
-#     There is no `id-token: write` and no broader scope.
+#   * Permissions are scoped to what claude-code-action needs to read the PR
+#     diff, post a review comment, and request an OIDC token; no broader
+#     scope is granted.
 #
-#   * Every action is pinned to a full commit SHA with a version comment.
+#   * The direct GitHub action is pinned to a full commit SHA with a version
+#     comment. The plugin marketplace below is anthropics' own repository, so
+#     the trust posture is the same as trusting the action itself.
 #
-# The ANTHROPIC_API_KEY repository secret must be configured by a maintainer
-# (Settings -> Secrets and variables -> Actions). See SECURITY.md.
+# The CLAUDE_CODE_OAUTH_TOKEN repository secret must be provisioned by a
+# maintainer (see SECURITY.md).
 
 name: Claude Code Review
 
@@ -29,15 +37,17 @@ on:
   pull_request:
     types: [labeled]
 
-permissions:
-  contents: read
-  pull-requests: write
-
 jobs:
   claude-review:
     # Gate: run only when a maintainer applies the `claude-review` label.
     if: github.event.label.name == 'claude-review'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      actions: read
+      id-token: write
     steps:
       # SHA-pinned actions/checkout v4.2.2
       - name: Check out the repository
@@ -51,8 +61,11 @@ jobs:
       - name: Run Claude code review
         uses: anthropics/claude-code-action@787c5a0ce96a9a6cfb050ea0c8f4c05f2447c251 # v1.0.133
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: >-
-            Review this pull request for correctness bugs, security issues, and
-            deviations from the project conventions in CLAUDE.md. Post a concise
-            code-review comment on the PR. Focus on real defects over style.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          include_fix_links: true
+          track_progress: true
+          allowed_bots: 'claude[bot]'
+          claude_args: '--model opus'
+          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }} --comment'

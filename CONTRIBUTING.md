@@ -34,15 +34,26 @@ install it with `pre-commit install` if `setup-dev.sh` did not.
 - **No personal data.** This is a public, open-source repository: examples,
   fixtures and docs use only fictional, generic content.
 
-## The `claude-review` label
+## Claude-driven review workflows
 
-This repository has an optional automated Claude code review. It is **not**
-run on every PR. A maintainer requests it by applying the **`claude-review`**
-label to a pull request; the review workflow then runs once and posts a review
-comment. Outside contributors cannot apply labels, so the review never runs on
-untrusted PRs automatically — this is a deliberate security measure (see
-`SECURITY.md`). If you would like a Claude review of your PR, ask a maintainer
-to apply the label.
+This repository has three optional Claude-driven workflows. None of them runs
+automatically on every PR — each one is gated so that only maintainers can
+trigger it. If you would like one applied to your PR, ask a maintainer.
+
+- **`claude-review` label** → runs `claude-code-review.yml`, a general code
+  review that posts a single review comment on the PR. Backed by an OAuth
+  subscription (no per-run API cost).
+- **`claude-security-review` label** → runs `claude-code-security-review.yml`,
+  a deeper security-focused pass. Backed by a metered API key, so it is used
+  more sparingly than the general review.
+- **`@claude` in a comment, issue, or PR review** → invokes the interactive
+  bot in `claude.yml`. The bot can read the repo, comment back, and (when
+  asked) commit code changes. It only responds to authors with at least
+  COLLABORATOR access — random outside users cannot drive it.
+
+Outside contributors cannot apply labels and do not have the access level
+required by the `@claude` bot, so none of these workflows can be triggered
+from untrusted fork code. See `SECURITY.md` for the full security rationale.
 
 ## Reporting bugs
 
