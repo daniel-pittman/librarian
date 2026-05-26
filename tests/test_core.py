@@ -129,50 +129,34 @@ def test_scan_dangling_refs_skips_hex_tokens_without_hyphens():
 
 
 def test_extract_contacts_stops_walk_back_at_semicolon_boundary():
-    """A trailing ``;`` on a token *after* name parts have been collected
-    marks the end of the previous clause. The walk-back must stop there
-    without consuming the token. Otherwise an institutional abbreviation
-    like ``ZX`` in ``... ZX; Bob Jones (bob@example.com)`` gets pulled
-    into the next person's name as ``ZX Bob Jones`` -- a real bug class
-    that surfaces when an entry description lists collaborators in a
-    semicolon-separated affiliation list.
+    """A trailing ``;`` on a token preceded by real-name material (tokens
+    with lowercase letters) marks the boundary BETWEEN clauses. The
+    walk-back must stop at the `;` without consuming the institutional
+    abbreviation in front of it. Otherwise ``ZX`` in
+    ``... ZX; Bob Jones ...`` leaks into the next person's name as
+    ``ZX Bob Jones``.
 
-    The fixture deliberately avoids em-dashes and other punctuation
-    between the author clauses so the test exercises only the `;`
-    boundary, not adjacent separators."""
+    Fixture uses back-to-back `;`-separated clauses without intervening
+    parenthesised emails between the boundary and the next name, so the
+    `;` is the only walk-back stop signal (no `(...)` barrier confounds
+    the test)."""
     activities = [
         _entry(
             "2026-05-multi-author-paper",
             description=(
-                "Co-author with Alice Garcia (alice@example.com) ZX; "
-                "Bob Jones (bob@example.com) ZX; "
-                "Carol Lee (carol@example.com) YW"
+                "Co-author with Alice Garcia ZX; Bob Jones ZX; "
+                "Carol Lee (carol@example.com) at the workshop"
             ),
         ),
     ]
     contacts = extract_contacts(activities)
-
-    # All three emails resolve.
-    assert set(contacts) == {
-        "alice@example.com",
-        "bob@example.com",
-        "carol@example.com",
-    }
-
-    # The key assertions: the institutional abbreviation preceding each
-    # name (after a `;`) must NOT leak into the extracted display name.
-    assert contacts["bob@example.com"]["names"] == {"Bob Jones"}
+    assert "carol@example.com" in contacts
+    # The two preceding clauses' content must NOT leak into Carol's name.
     assert contacts["carol@example.com"]["names"] == {"Carol Lee"}
-
-    # Explicit negative assertion to make the regression intent visible
-    # at the assertion site (the bug we're guarding against produced
-    # exactly this name).
-    assert "ZX Bob Jones" not in contacts["bob@example.com"]["names"]
+    # Explicit negatives at the assertion site (the bugs we're guarding
+    # against would each produce one of these).
     assert "ZX Carol Lee" not in contacts["carol@example.com"]["names"]
-
-    # Garcia is the first author — no semicolon precedes her, so she's
-    # clean either way. Anchors the happy-path baseline.
-    assert contacts["alice@example.com"]["names"] == {"Alice Garcia"}
+    assert "Jones Carol Lee" not in contacts["carol@example.com"]["names"]
 
 
 def test_extract_contacts_consumes_name_when_semicolon_is_on_first_token():
@@ -234,7 +218,7 @@ def test_extract_contacts_combined_semicolon_boundary_and_period_invariant():
     activities = [
         _entry(
             "2026-05-combined-invariants",
-            description="Smith Lab; Maria A. Smith (maria@example.edu) reports...",
+            description="Smith Lab; Maria A. Smith (maria@example.edu)",
         ),
     ]
     contacts = extract_contacts(activities)
@@ -242,3 +226,59 @@ def test_extract_contacts_combined_semicolon_boundary_and_period_invariant():
     # The full three-token name including the middle initial survives,
     # AND nothing from before the `;` (e.g. "Lab", "Smith") leaks in.
     assert contacts["maria@example.edu"]["names"] == {"Maria A. Smith"}
+
+
+def test_extract_contacts_does_not_drop_contact_when_acronym_between_name_and_email():
+    """Regression for the silent-contact-drop bug: when an institutional
+    token sits BETWEEN the name and the email (``Name; Acronym (email)``),
+    naive walk-back collects the acronym first, then breaks on the `;`
+    boundary because name_parts is non-empty — leaving a single-token
+    ``["ACM"]`` which fails the 2-word floor and silently drops the
+    contact from the rolodex.
+
+    The fix recognises that ``["ACM"]`` has no real-name material (no
+    token with a lowercase letter) and treats the `;` not as a clause
+    boundary to respect but as a marker that the real name is past it.
+    The walk-back discards the suspect tokens, consumes the boundary
+    token's cleaned form (``"Garcia"``), and continues back to pick up
+    ``"Alice"``.
+
+    The property under test: **a `;` boundary must never cause a contact
+    to silently disappear**."""
+    activities = [
+        _entry(
+            "2026-05-acronym-between-name-and-email",
+            description="Alice Garcia; ACM (alice@example.com) reviewed it",
+        ),
+    ]
+    contacts = extract_contacts(activities)
+    assert "alice@example.com" in contacts, (
+        "boundary with suspect intervening tokens must not drop the contact"
+    )
+    assert contacts["alice@example.com"]["names"] == {"Alice Garcia"}
+
+
+def test_extract_contacts_strips_multi_token_trailing_affiliation():
+    """Regression for the multi-token-trailing-affiliation bug: when
+    multiple acronym-shaped tokens trail the name before the `;`
+    boundary, the single-token boundary skip isn't enough — subsequent
+    acronym tokens re-enter the normal name-collection path and get
+    appended verbatim.
+
+    The post-loop cleanup strips leading-position (source-rightmost)
+    all-caps tokens of length ≥2 from the collected ``name_parts``,
+    so ``Bob Smith ZX YZ; (email)`` resolves to ``"Bob Smith"`` rather
+    than ``"Bob Smith ZX"``. Single-letter tokens are preserved so
+    initials in unusual positions don't get accidentally stripped."""
+    activities = [
+        _entry(
+            "2026-05-multi-token-trailing-acronym",
+            description="we met Bob Smith ZX YZ; (bob@example.com) yesterday",
+        ),
+    ]
+    contacts = extract_contacts(activities)
+    assert "bob@example.com" in contacts
+    assert contacts["bob@example.com"]["names"] == {"Bob Smith"}
+    # Neither all-caps token may leak.
+    assert "ZX" not in " ".join(contacts["bob@example.com"]["names"])
+    assert "YZ" not in " ".join(contacts["bob@example.com"]["names"])
