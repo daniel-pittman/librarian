@@ -4,15 +4,15 @@
 # code owner before it can merge, when branch protection has "Require review
 # from Code Owners" enabled.
 #
-# IMPORTANT: replace `@maintainer` below with the real GitHub handle of the
-# repository maintainer. For this rule to actually ENFORCE, that account must
-# be a DIRECT collaborator on the repository (or a member of a team with
-# direct access). Permissions inherited only through an organization do NOT
-# satisfy CODEOWNERS enforcement — GitHub silently treats the owner as invalid
-# and the rule does not block.
+# NOTE on forks: replace `@daniel-pittman` below with the new maintainer's
+# GitHub handle. For this rule to actually ENFORCE, that account must be a
+# DIRECT collaborator on the repository (or a member of a team with direct
+# access). Permissions inherited only through an organization do NOT satisfy
+# CODEOWNERS enforcement — GitHub silently treats the owner as invalid and the
+# rule does not block.
 
 # Workflow and CI configuration — the most security-sensitive paths.
-/.github/        @maintainer
+/.github/        @daniel-pittman
 
 # Packaging and project metadata.
-/pyproject.toml  @maintainer
+/pyproject.toml  @daniel-pittman

@@ -2,8 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://img.shields.io/badge/CI-lint%20%2B%20tests-blue.svg)](.github/workflows/ci.yml)
-<!-- Release badge: enable once an upstream repository exists, e.g.
-[![GitHub release](https://img.shields.io/github/v/release/OWNER/REPO)](https://github.com/OWNER/REPO/releases) -->
+[![GitHub release](https://img.shields.io/github/v/release/daniel-pittman/librarian)](https://github.com/daniel-pittman/librarian/releases)
 
 A lightweight, **local-first, plain-text** activity tracker — keep a running,
 structured record of what you actually do, so reporting season is a query
