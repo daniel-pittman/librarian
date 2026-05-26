@@ -71,6 +71,12 @@ by a **pluggable schema** you choose. It ships as:
   certification credits, student portfolio.
 - **Full-text and structured search** — `search`, `filter`, `list`, `project`,
   `similar`, `stats`.
+- **Project aggregation** — `project <name>` collects every entry tagged with
+  (or mentioning) a project name; `--strict` limits to exact tag match,
+  `--broad` includes keyword hits anywhere in the entry.
+- **Slice export** — `export` writes a filtered subset of entries to CSV or
+  JSON, with date and tag filters, for downstream reporting or import into
+  other tools.
 - **Format-preserving writes** — edits are surgical, line-level splices; your
   hand-formatting and paragraph breaks survive every write.
 - **Schema validation** — `validate` flags bad enum values, missing required
