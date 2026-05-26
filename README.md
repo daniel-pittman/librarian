@@ -72,8 +72,8 @@ by a **pluggable schema** you choose. It ships as:
 - **Full-text and structured search** — `search`, `filter`, `list`, `project`,
   `similar`, `stats`.
 - **Project aggregation** — `project <name>` collects every entry tagged with
-  (or mentioning) a project name; `--strict` limits to exact tag match,
-  `--broad` includes keyword hits anywhere in the entry.
+  a project name; `--strict` limits to exact tag match, `--broad` switches to
+  keyword hits anywhere in the entry text.
 - **Slice export** — `export` writes a filtered subset of entries to CSV or
   JSON, with date and tag filters, for downstream reporting or import into
   other tools.
@@ -228,8 +228,9 @@ A side-effect of writing descriptions is a queryable rolodex of the people you
 collaborate with. Every time a description mentions someone as
 `Name (email@domain)` or `Name <email@domain>`, the librarian indexes the pair
 and remembers which entry mentioned them. Ask `contact <query>` to look
-someone up by name or email fragment; the result lists every entry where they
-appear, so you can pivot from "who is Jane?" to "everything I've worked on
+someone up by name or email fragment; the result lists the entries where they
+appear (up to three by default — see the note below the example for the full
+list), so you can pivot from "who is Jane?" to "everything I've worked on
 with Jane" without running two searches. No manual rolodex curation — it's
 derived purely from the descriptions you already write.
 
