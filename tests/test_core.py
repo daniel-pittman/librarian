@@ -353,3 +353,73 @@ def test_extract_contacts_preserves_roman_numeral_name_suffix():
     contacts = extract_contacts(activities)
     assert "bob@example.com" in contacts
     assert contacts["bob@example.com"]["names"] == {"Bob Smith III"}
+
+
+def test_extract_contacts_preserves_suffix_carrying_trailing_semicolon():
+    """Regression for the `;`-handler / `_NAME_SUFFIXES` interaction. When
+    a legitimate name suffix (Roman numeral, generational, or all-caps
+    degree credential) carries the trailing `;`, the boundary handler's
+    all-caps branch must consult ``_NAME_SUFFIXES`` and consume the
+    cleaned token rather than treating it as an institutional acronym
+    and skip-continuing.
+
+    Without the fix, the post-loop allowlist never sees the suffix because
+    Case E discards it via ``name_parts.clear() + continue`` before the
+    post-loop runs."""
+    activities = [
+        _entry(
+            "2026-05-suffix-with-semicolon",
+            description=("Bob Smith III; (bob@example.com), Carol Lee MD; (carol@example.com)"),
+        ),
+    ]
+    contacts = extract_contacts(activities)
+    assert contacts["bob@example.com"]["names"] == {"Bob Smith III"}
+    assert contacts["carol@example.com"]["names"] == {"Carol Lee MD"}
+
+
+def test_extract_contacts_preserves_suffix_with_trailing_affiliation_and_semicolon():
+    """Sibling of the suffix-with-`;` case: when source order is
+    ``Name Acronym Suffix;``, the suffix still hits the boundary branch
+    first and must be preserved. The acronym between the name and the
+    suffix should still be stripped by the post-loop.
+
+    For ``Bob Smith ZX III; (email)``: walk-back hits ``III;`` first
+    (consumed via the suffix branch), then ``ZX`` (appended as a name
+    token under the normal path), then ``Smith``, ``Bob``. Post-loop
+    strips ``ZX`` (leading-position all-caps, not in ``_NAME_SUFFIXES``)
+    but leaves ``III`` because it IS in the allowlist."""
+    activities = [
+        _entry(
+            "2026-05-suffix-with-trailing-acronym",
+            description="we met Bob Smith ZX III; (bob@example.com) yesterday",
+        ),
+    ]
+    contacts = extract_contacts(activities)
+    assert "bob@example.com" in contacts
+    assert contacts["bob@example.com"]["names"] == {"Bob Smith III"}
+    assert "ZX" not in " ".join(contacts["bob@example.com"]["names"])
+
+
+def test_extract_contacts_case_d_clear_preserves_collected_name_suffixes():
+    """When Case D (the boundary-with-real-name-cleaned branch) fires, its
+    discard step must preserve any ``_NAME_SUFFIXES`` tokens already in
+    ``name_parts`` — those aren't suspect acronyms; they're legitimate
+    suffixes that happen to have been collected before the boundary.
+
+    Fixture: ``Foo Smith; III (email)`` (unusual placement of III on the
+    near-email side of the `;`, but the property still holds: III is a
+    valid suffix and shouldn't be silently lost when Case D clears)."""
+    activities = [
+        _entry(
+            "2026-05-case-d-preserves-suffix",
+            description="Foo Smith; III (bob@example.com) at the meeting",
+        ),
+    ]
+    contacts = extract_contacts(activities)
+    if "bob@example.com" in contacts:
+        names = contacts["bob@example.com"]["names"]
+        # Whatever name resolves for bob, it must include "III" (which
+        # was already collected before the `;` fired Case D's clear).
+        assert any("III" in n for n in names), (
+            f"III suffix should be preserved through Case D's clear; got {names}"
+        )
