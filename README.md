@@ -71,6 +71,13 @@ by a **pluggable schema** you choose. It ships as:
   certification credits, student portfolio.
 - **Full-text and structured search** — `search`, `filter`, `list`, `project`,
   `similar`, `stats`.
+- **Project aggregation** — `project <name>` lists every entry tagged with a
+  project name and appends any keyword-only matches as a "more like this"
+  section; `--strict` drops the appendix, `--broad` switches to keyword hits
+  anywhere in the entry text.
+- **Slice export** — `export` writes a filtered subset of entries to CSV or
+  JSON, with date and tag filters, for downstream reporting or import into
+  other tools.
 - **Format-preserving writes** — edits are surgical, line-level splices; your
   hand-formatting and paragraph breaks survive every write.
 - **Schema validation** — `validate` flags bad enum values, missing required
@@ -79,6 +86,15 @@ by a **pluggable schema** you choose. It ships as:
   changed since I last looked?" with `changes`.
 - **File inventory** — track supporting artifacts (PDFs, posters, certificates)
   in a normalized registry, with sha256 de-duplication.
+- **Contact rolodex** — auto-built index of the people you collaborate with,
+  derived from two-or-more-word `Name (email)` or `Name <email>` mentions in
+  your descriptions and queryable by name or email fragment.
+- **Safe cross-references** — `rename-id` repoints every backticked **and**
+  plain-text reference to an entry across the corpus, token-bounded so longer
+  ids aren't matched as substrings.
+- **Tag normalization** — `tag-audit` flags case and separator variants of the
+  same tag (e.g. `Build-A-Bot` vs `build-a-bot`) so they don't fragment your
+  index over time.
 - **Concurrency-safe** — `fcntl` advisory locking guards every write.
 - **MCP server** — drive the whole tool from an AI assistant.
 - **Duplicate detection** — fuzzy similarity warns you before you create a
@@ -207,6 +223,37 @@ librarian add-docs 2026-03-launch file:cert --label cli:setup
 librarian file-list --orphans     # inventory coverage report
 ```
 
+## The contact rolodex
+
+A side-effect of writing descriptions is a queryable rolodex of the people you
+collaborate with. Every time a description mentions someone with a two-or-more-word name like
+`First Last (email@domain)` or `First Last <email@domain>`, the librarian
+indexes the pair and remembers which entry mentioned them (single-token
+mentions are skipped as too noisy to be reliable names). Ask `contact <query>`
+to look someone up by name or email fragment; the result lists the entries where they
+appear (up to three by default — see the note below the example for the full
+list), so you can pivot from "who is Jane?" to "everything I've worked on
+with Jane" without running two searches. No manual rolodex curation — it's
+derived purely from the descriptions you already write.
+
+```bash
+librarian contact garcia
+# Found 1 contact(s):
+#
+#   Dr. Maria Garcia
+#     mgarcia@example.edu
+#     Sources: 2024-grant-application, 2025-conference-poster, 2025-coauthored-paper
+```
+
+The default text output caps the `Sources:` list at three entries per contact.
+Pass `--format json` for the full, untruncated list (useful when a recurring
+collaborator appears in many entries). Browse the whole rolodex with
+`librarian contact --all`, or filter by any email substring with
+`librarian contact --institution example.edu` to surface everyone at a single
+institution (the flag is name-suggestive of the domain case but matches
+anywhere in the email — `--institution garcia` would also hit local-parts
+like `garcia@anywhere.com`).
+
 ## The MCP server
 
 `librarian` ships an [MCP](https://modelcontextprotocol.io) server so an AI
@@ -324,11 +371,11 @@ Run `librarian <command> --help` for command-specific options.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup and the local
-checks (`ruff check`, `ruff format --check`, `pytest`). Maintainers can request
-an automated review on a pull request by applying the **`claude-review`** label;
-it does not run otherwise. Security issues: see [SECURITY.md](SECURITY.md) —
-please do not open a public issue for them.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, the local
+checks (`ruff check`, `ruff format --check`, `pytest`), and the
+Claude-driven review workflows that run automatically on pull requests. Security
+issues: see [SECURITY.md](SECURITY.md) — please do not open a public issue
+for them.
 
 ## License
 
