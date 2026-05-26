@@ -22,3 +22,4 @@ venv/
 # Local librarian data home (if generated during manual testing)
 /data/
 *.lock
+nanobanana-output/
