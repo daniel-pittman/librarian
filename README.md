@@ -86,8 +86,8 @@ by a **pluggable schema** you choose. It ships as:
 - **File inventory** — track supporting artifacts (PDFs, posters, certificates)
   in a normalized registry, with sha256 de-duplication.
 - **Contact rolodex** — auto-built index of the people you collaborate with,
-  derived from `Name (email)` mentions in your descriptions and queryable by
-  name or email fragment.
+  derived from `Name (email)` or `Name <email>` mentions in your descriptions
+  and queryable by name or email fragment.
 - **Safe cross-references** — `rename-id` repoints every backticked **and**
   plain-text reference to an entry across the corpus, token-bounded so longer
   ids aren't matched as substrings.
@@ -226,20 +226,25 @@ librarian file-list --orphans     # inventory coverage report
 
 A side-effect of writing descriptions is a queryable rolodex of the people you
 collaborate with. Every time a description mentions someone as
-`Name (email@domain)`, the librarian indexes the pair and remembers which
-entry mentioned them. Ask `contact <query>` to look someone up by name or
-email fragment; the result lists every entry where they appear, so you can
-pivot from "who is Jane?" to "everything I've worked on with Jane" without
-running two searches. No manual rolodex curation — it's derived purely from
-the descriptions you already write.
+`Name (email@domain)` or `Name <email@domain>`, the librarian indexes the pair
+and remembers which entry mentioned them. Ask `contact <query>` to look
+someone up by name or email fragment; the result lists every entry where they
+appear, so you can pivot from "who is Jane?" to "everything I've worked on
+with Jane" without running two searches. No manual rolodex curation — it's
+derived purely from the descriptions you already write.
 
 ```bash
 librarian contact garcia
+# Found 1 contact(s):
+#
 #   Dr. Maria Garcia
 #     mgarcia@example.edu
-#     Sources: 2024-grant-application, 2025-conference-poster,
-#              2025-coauthored-paper
+#     Sources: 2024-grant-application, 2025-conference-poster, 2025-coauthored-paper
 ```
+
+The default text output caps the `Sources:` list at three entries per contact.
+Pass `--format json` for the full, untruncated list (useful when a recurring
+collaborator appears in many entries).
 
 ## The MCP server
 
