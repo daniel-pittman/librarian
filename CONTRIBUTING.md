@@ -36,25 +36,18 @@ install it with `pre-commit install` if `setup-dev.sh` did not.
 
 ## Claude-driven review workflows
 
-This repository has three Claude-driven workflows. The first two run
-automatically on every PR; the third is interactive.
+This repository runs three Claude-driven workflows on contributor activity:
 
-- **`claude-code-review.yml`** — a general code review that posts a single
-  comment on every PR (opened / synchronized / ready-for-review / reopened).
-  Backed by an OAuth subscription (no per-run API cost).
-- **`claude-security-review.yml`** — a deeper security-focused pass. Runs on
-  every PR whose base is `main` or `develop`, and can also be dispatched
-  manually by a maintainer. Backed by a metered API key.
-- **`@claude` in a comment, issue, or PR review** → invokes the interactive
-  bot in `claude.yml`. The bot can read the repo, comment back, and (when
-  asked) commit code changes. It only responds to authors with at least
-  COLLABORATOR access — random outside users cannot drive it.
+- **Code review** — every PR gets an automatic review comment from Claude.
+- **Security review** — PRs targeting `main` or `develop` also get a deeper,
+  security-focused review.
+- **`@claude` bot** — collaborators can mention `@claude` in an issue or PR
+  comment to ask questions, request changes, or have it summarize. Only
+  authors with collaborator access can drive it.
 
-Drive-by abuse from untrusted fork PRs is bounded at the repository level:
-**Settings → Actions → Fork pull-request workflows from outside collaborators**
-is set to "Require approval for all outside collaborators", so a first-time
-contributor's first workflow run must be approved by a maintainer before any
-Action executes. See `SECURITY.md` for the full security rationale.
+First-time outside contributors: your first workflow run may need a
+maintainer to approve it before any review runs. After that, runs are
+automatic on subsequent pushes.
 
 ## Reporting bugs
 

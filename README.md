@@ -2,7 +2,7 @@
   <img src="docs/img/librarian-logo.png" alt="The Librarian — a friendly young cartoon character with round spectacles and a navy cardigan, holding a small stack of manila folders" width="240">
 </p>
 
-# librarian
+# The Librarian
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/daniel-pittman/librarian/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/daniel-pittman/librarian/actions/workflows/ci.yml)
