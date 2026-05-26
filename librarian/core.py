@@ -321,6 +321,41 @@ def _walk_back_for_name(text: str, email_start: int) -> str:
     tokens = snippet.split()
     name_parts: list[str] = []
     for token in reversed(tokens):
+        # A trailing `;` is a strong clause boundary, but its meaning depends
+        # on whether we've already collected name parts:
+        #
+        #   * ``name_parts`` non-empty: the `;` ends the PREVIOUS clause
+        #     before the name we've already collected. E.g. in
+        #     ``ZX; Alice Garcia (email)`` walking back we first collect
+        #     "Garcia", "Alice", then hit "ZX;" — we must NOT consume
+        #     "ZX" or the institutional abbreviation leaks into the
+        #     display name. Break without consuming.
+        #
+        #   * ``name_parts`` empty: the `;` ends the CURRENT clause and the
+        #     name word itself is in this token. E.g. ``Bob Smith; (email)``
+        #     puts "Smith;" as the first walk-back token. Strip the `;`,
+        #     consume the remainder as a normal name word, then KEEP
+        #     walking back to pick up "Bob".
+        #
+        # Trailing `.` is intentionally NOT treated as a boundary: it
+        # legitimately ends honorifics in ``_NAME_TITLES`` (``Dr.``,
+        # ``Prof.``) and middle initials like ``A.`` in ``Maria A. Smith``.
+        #
+        # Known limitations not handled by this check:
+        #   * Comma-separated author lists (``Alice Smith, Bob Jones``) —
+        #     `,` is still silently stripped, so earlier authors can leak
+        #     into the last name. Disambiguating ``Smith, Jr.`` from
+        #     ``Smith, Bob`` requires look-ahead and is deferred.
+        #   * Trailing punctuation after the `;` (e.g. ``ZX;)``), no space
+        #     after the `;` (``ZX;Alice``), and Unicode look-alike
+        #     semicolons (``；``) all bypass this ASCII-`;`-at-end check.
+        if token.endswith(";"):
+            if not name_parts:
+                cleaned = token.rstrip(";").strip(",;:")
+                if cleaned and _is_name_token(cleaned, is_last_name=True):
+                    name_parts.append(cleaned)
+                    continue
+            break
         is_last_name = not name_parts
         if not _is_name_token(token, is_last_name=is_last_name):
             break
