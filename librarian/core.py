@@ -268,6 +268,50 @@ _NAME_PARTICLES = frozenset(
 )
 # Honorifics that may precede a name.
 _NAME_TITLES = frozenset({"Dr", "Dr.", "Mr", "Mr.", "Ms", "Ms.", "Mrs", "Mrs.", "Prof", "Prof."})
+# Generational / ordinal name suffixes that look acronym-shaped (all-caps,
+# length >= 2) but legitimately belong on the end of a name. Excluded from
+# the post-loop all-caps strip so ``Bob Smith III`` keeps the ``III``.
+# Note: ``Jr``/``Jr.``/``Sr``/``Sr.`` happen to survive the post-loop strip
+# on their own (the lowercase ``r`` breaks the all-upper check), but they
+# belong in this set for consistency and robustness against future
+# refactoring of the strip condition.
+_NAME_SUFFIXES = frozenset(
+    {
+        "II",
+        "III",
+        "IV",
+        "V",
+        "VI",
+        "VII",
+        "VIII",
+        "IX",
+        "X",
+        "XI",
+        "XII",
+        "Jr",
+        "Jr.",
+        "Sr",
+        "Sr.",
+        # All-caps variants of Jr/Sr — uncommon stylistically but seen
+        # in legal-style author lists.
+        "JR",
+        "JR.",
+        "SR",
+        "SR.",
+        # All-caps degree / credential suffixes. The lowercase-letter
+        # forms (PhD, MSc, BSc) survive the all-upper check on their
+        # own; these all-caps forms need the allowlist to preserve them.
+        "MD",
+        "MA",
+        "BA",
+        "MS",
+        "BS",
+        "JD",
+        "MBA",
+        "DDS",
+        "DVM",
+    }
+)
 # Capitalised role nouns that should stop a name walk-back.
 _ROLE_STOP_WORDS = frozenset(
     {
@@ -316,15 +360,177 @@ def _is_name_token(token: str, *, is_last_name: bool) -> bool:
 
 
 def _walk_back_for_name(text: str, email_start: int) -> str:
-    """Extract the capitalised name sequence ending just before an email."""
+    """Extract the capitalised name sequence ending just before an email.
+
+    Driven by a single property: a real-name token is one that contains at
+    least one lowercase letter. Acronyms (``DU``, ``ZX``, ``ACM``) lack
+    lowercase letters by construction; honorifics (``Dr.``, ``Mr.``) are
+    handled by ``_NAME_TITLES``; generational / degree suffixes that look
+    acronym-shaped (``III``, ``MD``, ``MBA``) are preserved via the explicit
+    ``_NAME_SUFFIXES`` allowlist. The `;`-boundary handling and the post-loop
+    cleanup both key off these checks, which lets the same logic cover six
+    arrangements:
+
+      A. ``Bob Smith (email)`` — no boundary. Standard walk-back.
+      B. ``Bob Smith; (email)`` — boundary IS the name's last word.
+      C. ``ZX; Bob Smith (email)`` — boundary BEFORE real-name material.
+      D. ``Alice Garcia; ACM (email)`` — institutional between name and email.
+      E. ``Bob Smith ZX; (email)`` — single trailing acronym.
+      F. ``Bob Smith ZX YZ; (email)`` — multi-token trailing acronyms.
+
+    Walking back, we keep collecting plausibly-name tokens until we hit a
+    `;` boundary. When the boundary fires, the decision is binary on whether
+    we've collected any real-name material (any token with a lowercase
+    letter):
+
+      * Have real-name material → respect the boundary, stop here (Case B/C).
+      * No real-name material yet → the name is past the boundary; discard
+        whatever suspect tokens we collected, optionally consume the
+        boundary token's cleaned form if it has lowercase, continue walking
+        back (Case D, also handles the boundary-on-first-token sub-case).
+      * Boundary token itself is suspect (all-caps) → skip it without
+        consuming and keep walking (Case E).
+
+    After the loop, strip leading-position (source-rightmost) all-caps
+    tokens of length ≥2 from ``name_parts``. This handles multi-token
+    trailing affiliations that slipped past the boundary skip because they
+    didn't carry the `;` themselves (Case F). The 2-char-minimum preserves
+    single-letter initials.
+
+    Trailing `.` is intentionally NOT treated as a boundary: it legitimately
+    ends honorifics in ``_NAME_TITLES`` (``Dr.``, ``Prof.``) and middle
+    initials like ``A.`` in ``Maria A. Smith``.
+
+    Known limitations:
+
+      * Comma-separated author lists (``Alice Smith, Bob Jones``) — `,` is
+        still silently stripped by ``_is_name_token`` and the append. The
+        last author's name can absorb earlier authors. Fixing requires
+        disambiguating ``Smith, Jr.`` (intra-name) from ``Smith, Bob``
+        (cross-clause), which needs look-ahead and is deferred.
+      * Trailing punctuation after the `;` (``ZX;)``), no space after the
+        `;` (``ZX;Alice``), and Unicode look-alike semicolons (``；``,
+        ``;``) all bypass this ASCII-`;`-at-end check.
+      * 80-char snippet window. If a verbose affiliation pushes the prior
+        author's `;` outside the window, the boundary never enters the
+        token list and the leak resurfaces.
+      * **False-positive class: capitalised noise without an acronym
+        marker.** A description like ``Reviewed Annual Filings ZX; (email)``
+        produces ``Reviewed Annual Filings`` as a "name" — the skip-continue
+        branch consumes the visible ``ZX`` marker that a human auditor
+        might otherwise use to spot the corruption. Pre-aabb211 the same
+        input produced ``Reviewed Annual Filings ZX`` (still wrong, but
+        self-flagging). The walk-back has no semantic name detector, so
+        this class of false positive can't be fully closed without a more
+        substantial redesign.
+      * **All-caps last names** (``SMITH``, ``CHEN``) are misclassified as
+        institutional acronyms by the lowercase-letter check and stripped
+        by the post-loop cleanup. Author lists that use ``SMITH, J.`` style
+        all-caps last names will lose those contacts. Real-world impact is
+        narrow because most description prose uses Title Case for names.
+      * **Internal-`;` tokens** like ``"III;some"`` (a `;` mid-token without
+        whitespace around it) bypass the ``endswith(";")`` boundary gate.
+        The token then enters ``name_parts`` literally, producing a display
+        name containing an embedded `;` (e.g. ``"Bob III;some Jones"``).
+        Realistic only when descriptions concatenate text via search-and-
+        replace that drops a space; the `;`-handler operates on whitespace-
+        delimited tokens.
+
+    The result is capped at 4 tokens (``name_parts[:4]``) — anything longer
+    almost always swept in a role title at the source-leftmost position
+    (the first-name end of the name in source order, since ``name_parts`` is
+    built in reverse-source order during the walk-back).
+    """
     snippet = text[max(0, email_start - 80) : email_start]
     tokens = snippet.split()
     name_parts: list[str] = []
+
+    def has_lowercase(s: str) -> bool:
+        return any(ch.islower() for ch in s)
+
     for token in reversed(tokens):
+        if token.endswith(";"):
+            cleaned = token.rstrip(";").strip(",;:")
+            # A bare `;` token (whitespace on both sides → cleaned is
+            # empty) is always a hard clause boundary regardless of
+            # whether name_parts is empty. Without this, the walk-back
+            # would silently sweep across the boundary.
+            if not cleaned:
+                break
+            # Have we collected any real-name material (a token with at
+            # least one lowercase letter) on this side of the boundary?
+            if any(has_lowercase(p) for p in name_parts):
+                # Yes — respect the boundary. Stop without consuming.
+                break
+            # No real-name material yet. Four sub-cases for the boundary
+            # token's `cleaned` form:
+            if has_lowercase(cleaned):
+                if _is_name_token(cleaned, is_last_name=not name_parts):
+                    # Real name word terminating its own clause
+                    # (e.g. "Smith;"). Discard suspect tokens (but
+                    # preserve any legitimate name suffixes already
+                    # collected — e.g. ``III`` in ``Foo Smith; III``),
+                    # consume the cleaned remainder, continue walking
+                    # back for preceding name words.
+                    name_parts[:] = [p for p in name_parts if p in _NAME_SUFFIXES]
+                    name_parts.append(cleaned)
+                    continue
+                # Lowercase but NOT a name token — it's a role stop-word
+                # (Director, Manager, Lead) or a particle. The `;` is a
+                # real boundary; respect it rather than skip-continue,
+                # which would silently sweep the prior clause's name
+                # tokens and misattribute them to this email.
+                break
+            # cleaned is all-caps. Two sub-cases:
+            if cleaned in _NAME_SUFFIXES:
+                # Legitimate name suffix terminating its clause
+                # (e.g. ``Bob Smith III;`` or ``Bob Smith MD;``).
+                # Preserve it like Case D's name-word path: discard
+                # suspects, consume, continue walking back.
+                name_parts[:] = [p for p in name_parts if p in _NAME_SUFFIXES]
+                name_parts.append(cleaned)
+                continue
+            # Institutional acronym in trailing position. Skip without
+            # consuming and continue walking back to find the real
+            # name behind it.
+            name_parts.clear()
+            continue
         is_last_name = not name_parts
         if not _is_name_token(token, is_last_name=is_last_name):
             break
         name_parts.append(token.strip(",;:"))
+
+    # Post-loop: strip leading-position (source-rightmost) all-caps tokens
+    # of length ≥2 — these are multi-token trailing affiliations that the
+    # boundary skip didn't catch (because they didn't carry the `;`
+    # themselves). Length-1 tokens preserved so single-letter initials
+    # without trailing punctuation don't get stripped.
+    #
+    # Two-pass design so a legitimate name suffix at position 0 doesn't
+    # block the acronym strip behind it:
+    #   1. Collect a run of leading-position ``_NAME_SUFFIXES`` tokens
+    #      (the source-rightmost suffixes — e.g. ``III``).
+    #   2. Strip leading-position all-caps non-suffix tokens (the
+    #      affiliations — e.g. ``ZX``).
+    #   3. Re-attach the suffix run at the front so the suffix stays at
+    #      its source-rightmost position relative to the name.
+    #
+    # The ``len ≥ 2`` guard is load-bearing for the empty-string edge
+    # case: ``all(ch.isalpha() and ch.isupper() for ch in "")`` is
+    # vacuously True, so without the guard a phantom empty token would
+    # loop forever.
+    trailing_suffixes: list[str] = []
+    while name_parts and name_parts[0] in _NAME_SUFFIXES:
+        trailing_suffixes.append(name_parts.pop(0))
+    while (
+        name_parts
+        and len(name_parts[0]) >= 2
+        and name_parts[0] not in _NAME_SUFFIXES
+        and all(ch.isalpha() and ch.isupper() for ch in name_parts[0])
+    ):
+        name_parts.pop(0)
+    name_parts[:0] = trailing_suffixes
+
     if not name_parts:
         return ""
     # Cap at 4 tokens — anything longer almost always swept in a role title.
