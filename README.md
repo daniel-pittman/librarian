@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/img/librarian-logo.png" alt="The Librarian — a kindly older gentleman with round spectacles, a dark waistcoat, and a rust bow tie, holding a small stack of manila folders" width="240">
+</p>
+
 # librarian
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -5,9 +9,9 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![GitHub release](https://img.shields.io/github/v/release/daniel-pittman/librarian)](https://github.com/daniel-pittman/librarian/releases)
 
-A lightweight, **local-first, plain-text** activity tracker — keep a running,
-structured record of what you actually do, so reporting season is a query
-instead of a memory test.
+Meet **the Librarian**. He's a lightweight, **local-first, plain-text** activity
+tracker — keep a running, structured record of what you actually do, so
+reporting season is a query instead of a memory test.
 
 ---
 
