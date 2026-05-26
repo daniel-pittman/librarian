@@ -177,11 +177,11 @@ def test_extract_contacts_stops_walk_back_at_semicolon_boundary():
 
 def test_extract_contacts_consumes_name_when_semicolon_is_on_first_token():
     """When a trailing ``;`` appears on the very first walk-back token
-    (no name parts collected yet), the `;` is terminating the CURRENT
-    author's clause, not bounding a previous one. The name word itself
-    is in this token (e.g. ``Bob Smith;``) and the walk-back must
-    strip-and-consume the cleaned token, then continue back to pick up
-    preceding name words.
+    AND the cleaned remainder contains a lowercase letter (i.e. is
+    plausibly a real name word, not an acronym), the `;` is terminating
+    the CURRENT author's clause. The name word itself is in this token
+    (e.g. ``Bob Smith;``) and the walk-back must strip-and-consume the
+    cleaned token, then continue back to pick up preceding name words.
 
     This is the inverse of the boundary case above and the silent
     regression a naive break-before-consume implementation would
@@ -199,19 +199,46 @@ def test_extract_contacts_consumes_name_when_semicolon_is_on_first_token():
     assert contacts["bob@example.com"]["names"] == {"Bob Smith"}
 
 
-def test_extract_contacts_preserves_initial_in_name_after_semicolon_fix():
-    """The semicolon-boundary fix must NOT also block walk-back at a
-    trailing ``.``: middle initials (``Maria A. Smith``) and titles
-    (``Dr.``, ``Prof.``) legitimately end with a period. Anchors the
-    "trailing `.` is not a clause boundary" invariant alongside the
-    "trailing `;` IS a clause boundary" one tested above."""
+def test_extract_contacts_skips_trailing_acronym_to_find_name_behind_it():
+    """Symmetric case to the leading-affiliation form. When the institutional
+    abbreviation appears AFTER the name in source order, the walk-back
+    encounters the acronym token first. The cleaned remainder has no
+    lowercase letter, so it's NOT consumed as a name — but the walk-back
+    must SKIP it (not break) and continue back to find the real name
+    behind the affiliation.
+
+    Without this skip, ``Bob Smith ZX; (email)`` was producing the same
+    ``ZX``-prefix leak the PR is supposed to fix, just with the
+    affiliation in trailing rather than leading position."""
     activities = [
         _entry(
-            "2026-05-initial-test",
-            description="Lead author Maria A. Smith (maria@example.edu) reports...",
+            "2026-05-trailing-affiliation",
+            description="we met with Bob Smith ZX; (bob@example.com) yesterday.",
+        ),
+    ]
+    contacts = extract_contacts(activities)
+    assert "bob@example.com" in contacts
+    assert contacts["bob@example.com"]["names"] == {"Bob Smith"}
+    # The institutional abbreviation must NOT have leaked.
+    assert "Bob Smith ZX" not in contacts["bob@example.com"]["names"]
+    assert "ZX" not in " ".join(contacts["bob@example.com"]["names"])
+
+
+def test_extract_contacts_combined_semicolon_boundary_and_period_invariant():
+    """Combines both invariants in one fixture so the test actually
+    exercises the new `;`-boundary branch alongside the "trailing `.` is
+    NOT a boundary" guarantee. The walk-back hits ``Lab;`` (a real-name-
+    shaped clause-end with lowercase, consumed), then ``A.`` (middle
+    initial, not a boundary), then more name words. One assertion guards
+    both axes."""
+    activities = [
+        _entry(
+            "2026-05-combined-invariants",
+            description="Smith Lab; Maria A. Smith (maria@example.edu) reports...",
         ),
     ]
     contacts = extract_contacts(activities)
     assert "maria@example.edu" in contacts
-    # The full three-token name including the middle initial survives.
-    assert "Maria A. Smith" in contacts["maria@example.edu"]["names"]
+    # The full three-token name including the middle initial survives,
+    # AND nothing from before the `;` (e.g. "Lab", "Smith") leaks in.
+    assert contacts["maria@example.edu"]["names"] == {"Maria A. Smith"}

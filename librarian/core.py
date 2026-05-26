@@ -322,7 +322,8 @@ def _walk_back_for_name(text: str, email_start: int) -> str:
     name_parts: list[str] = []
     for token in reversed(tokens):
         # A trailing `;` is a strong clause boundary, but its meaning depends
-        # on whether we've already collected name parts:
+        # on whether we've already collected name parts AND on the shape of
+        # the token's name-part remainder. Three sub-cases:
         #
         #   * ``name_parts`` non-empty: the `;` ends the PREVIOUS clause
         #     before the name we've already collected. E.g. in
@@ -331,11 +332,18 @@ def _walk_back_for_name(text: str, email_start: int) -> str:
         #     "ZX" or the institutional abbreviation leaks into the
         #     display name. Break without consuming.
         #
-        #   * ``name_parts`` empty: the `;` ends the CURRENT clause and the
-        #     name word itself is in this token. E.g. ``Bob Smith; (email)``
-        #     puts "Smith;" as the first walk-back token. Strip the `;`,
-        #     consume the remainder as a normal name word, then KEEP
-        #     walking back to pick up "Bob".
+        #   * ``name_parts`` empty AND the cleaned token contains at least
+        #     one lowercase letter (real name like "Smith"): the `;` ends
+        #     the CURRENT clause and the name word itself is in this token.
+        #     E.g. ``Bob Smith; (email)``. Consume the cleaned remainder
+        #     and KEEP walking back to pick up preceding name words.
+        #
+        #   * ``name_parts`` empty AND the cleaned token is an all-caps
+        #     short acronym (no lowercase letter — like "ZX", "DU"):
+        #     this is the inverse arrangement, where the affiliation
+        #     comes AFTER the name. E.g. ``Bob Smith ZX; (email)``.
+        #     SKIP without consuming and keep walking back so the real
+        #     name behind the affiliation gets picked up.
         #
         # Trailing `.` is intentionally NOT treated as a boundary: it
         # legitimately ends honorifics in ``_NAME_TITLES`` (``Dr.``,
@@ -349,13 +357,24 @@ def _walk_back_for_name(text: str, email_start: int) -> str:
         #   * Trailing punctuation after the `;` (e.g. ``ZX;)``), no space
         #     after the `;` (``ZX;Alice``), and Unicode look-alike
         #     semicolons (``；``) all bypass this ASCII-`;`-at-end check.
+        #   * The 80-char snippet window above. If a verbose affiliation
+        #     pushes the prior author's `;` outside that window, the
+        #     boundary never enters the token list and the leak resurfaces.
         if token.endswith(";"):
-            if not name_parts:
-                cleaned = token.rstrip(";").strip(",;:")
-                if cleaned and _is_name_token(cleaned, is_last_name=True):
-                    name_parts.append(cleaned)
-                    continue
-            break
+            cleaned = token.rstrip(";").strip(",;:")
+            if name_parts or not cleaned:
+                # Boundary BEFORE collected name parts, OR a degenerate
+                # `;`-only token. Stop without consuming.
+                break
+            if any(ch.islower() for ch in cleaned) and _is_name_token(cleaned, is_last_name=True):
+                # Real name word terminating its own clause. Consume
+                # and continue walking back for preceding name words.
+                name_parts.append(cleaned)
+                continue
+            # All-caps short token (acronym / institutional abbreviation
+            # in trailing position). Skip and continue walking back to
+            # find the real name behind it.
+            continue
         is_last_name = not name_parts
         if not _is_name_token(token, is_last_name=is_last_name):
             break
