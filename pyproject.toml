@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "librarian-tracker"
-version = "0.1.0"
+version = "1.0.0"
 description = "A local-first, plain-text activity tracker with a pluggable schema and an MCP server."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "librarian contributors" }]
 keywords = ["activity-tracking", "yaml", "cli", "mcp", "portfolio", "performance-review"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
     "License :: OSI Approved :: MIT License",

@@ -18,8 +18,8 @@ parsing), but all reports are welcome.
 
 ## Supported versions
 
-This project is pre-1.0. Security fixes are applied to the latest release on
-the default branch.
+Security fixes are applied to the latest release on the default branch and
+shipped as patch releases on the 1.x line.
 
 ---
 

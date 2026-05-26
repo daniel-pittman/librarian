@@ -1,7 +1,8 @@
 # librarian
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![CI](https://img.shields.io/badge/CI-lint%20%2B%20tests-blue.svg)](.github/workflows/ci.yml)
+[![CI](https://github.com/daniel-pittman/librarian/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/daniel-pittman/librarian/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![GitHub release](https://img.shields.io/github/v/release/daniel-pittman/librarian)](https://github.com/daniel-pittman/librarian/releases)
 
 A lightweight, **local-first, plain-text** activity tracker — keep a running,
