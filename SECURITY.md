@@ -70,10 +70,37 @@ the review requirement does not block. Confirm the owner appears under
 - Enable **Secret scanning**.
 - Enable **Push protection** (blocks commits that contain detected secrets).
 
-### 5. Configure the Claude review API key
+### 5. Configure the Claude review secrets
 
-The `claude-code-review.yml` workflow reads `${{ secrets.ANTHROPIC_API_KEY }}`.
-Add it under **Settings → Secrets and variables → Actions → New repository
-secret**. The workflow only runs when a maintainer applies the `claude-review`
-label to a PR (see CONTRIBUTING.md), so the key is never exposed to untrusted
-fork code.
+The repository ships three optional Claude-driven workflows. Each one is
+**inert** until its secret is provisioned, so you can enable them
+independently as you decide what's worth running.
+
+#### `CLAUDE_CODE_OAUTH_TOKEN` — used by `claude-code-review.yml` and `claude.yml`
+
+These two workflows draw against a Claude **subscription** (not metered API
+billing). Provision the token by running
+
+```
+claude /install-github-app
+```
+
+from a local Claude Code session in this repository. The command installs the
+official Claude Code GitHub App on the repo and writes the OAuth token to
+**Settings → Secrets and variables → Actions** as `CLAUDE_CODE_OAUTH_TOKEN`.
+
+- `claude-code-review.yml` runs only when a maintainer applies the
+  **`claude-review`** label to a PR. Outside contributors cannot apply labels,
+  so the token is never exposed to untrusted fork code.
+- `claude.yml` (the interactive `@claude` bot) runs only when the commenter /
+  issue author has at least **COLLABORATOR** access on the repository. Random
+  outside users cannot trigger it even by including `@claude` in their text.
+
+#### `ANTHROPIC_API_KEY` — used by `claude-security-review.yml`
+
+The security-review action does not currently support OAuth, so this workflow
+uses a metered API key. Add it under **Settings → Secrets and variables →
+Actions → New repository secret** as `ANTHROPIC_API_KEY`. The workflow runs
+only when a maintainer applies the **`claude-security-review`** label or
+manually dispatches the workflow — both gates require write access, so the
+key cannot be drained by drive-by PRs.
