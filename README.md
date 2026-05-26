@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/img/librarian-logo.png" alt="The Librarian — a kindly older gentleman with round spectacles, a dark waistcoat, and a rust bow tie, holding a small stack of manila folders" width="240">
+  <img src="docs/img/librarian-logo.png" alt="The Librarian — a friendly young cartoon character with round spectacles and a navy cardigan, holding a small stack of manila folders" width="240">
 </p>
 
 # librarian
