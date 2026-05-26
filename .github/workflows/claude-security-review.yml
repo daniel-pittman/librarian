@@ -1,15 +1,18 @@
-# Claude-driven security review on labeled PRs.
+# Claude-driven security review on every PR targeting `main` or `develop`.
 #
 # This workflow uses the metered ANTHROPIC_API_KEY (not the OAuth token)
 # because anthropics/claude-code-security-review does not currently support
-# OAuth bindings. Every run consumes API credits, so the trigger is gated
-# tightly:
+# OAuth bindings. Cost-control posture:
 #
-#   * Trigger is `pull_request` with `types: [labeled]` plus `workflow_dispatch`
-#     (manual). The job is gated on either the `claude-security-review` label
-#     or a manual dispatch by a maintainer. Outside contributors cannot apply
-#     labels and cannot dispatch workflows, so they cannot burn API credits
-#     with drive-by PRs.
+#   * Trigger is scoped to PRs whose BASE branch is `main` or `develop`. Day-
+#     to-day feature-branch PRs (e.g. feature -> feature, draft -> draft) do
+#     not pay the API cost. A `workflow_dispatch` trigger is also wired so a
+#     maintainer can manually re-run the review on demand.
+#
+#   * "Require approval for all outside collaborators" is enabled in the
+#     repository's Actions settings. A first-time outside contributor's first
+#     workflow run must be approved by a maintainer before any Action
+#     executes, which bounds drive-by API-credit burn from random PRs.
 #
 #   * Permissions are minimal: `contents: read` + `pull-requests: write`.
 #
@@ -26,7 +29,7 @@ name: Claude Security Review
 
 on:
   pull_request:
-    types: [labeled]
+    branches: [main, develop]
   workflow_dispatch:
 
 permissions:
@@ -35,7 +38,6 @@ permissions:
 
 jobs:
   security-review:
-    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'claude-security-review'
     runs-on: ubuntu-latest
     steps:
       # SHA-pinned actions/checkout v4.2.2

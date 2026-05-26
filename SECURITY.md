@@ -89,9 +89,11 @@ from a local Claude Code session in this repository. The command installs the
 official Claude Code GitHub App on the repo and writes the OAuth token to
 **Settings → Secrets and variables → Actions** as `CLAUDE_CODE_OAUTH_TOKEN`.
 
-- `claude-code-review.yml` runs only when a maintainer applies the
-  **`claude-review`** label to a PR. Outside contributors cannot apply labels,
-  so the token is never exposed to untrusted fork code.
+- `claude-code-review.yml` runs automatically on every pull request. The
+  outside-collaborator approval gate (step 1 above) is what bounds drive-by
+  subscription-quota burn from random fork PRs: a first-time outside
+  contributor's first workflow run must be approved by a maintainer before
+  any Action executes.
 - `claude.yml` (the interactive `@claude` bot) runs only when the commenter /
   issue author has at least **COLLABORATOR** access on the repository. Random
   outside users cannot trigger it even by including `@claude` in their text.
@@ -101,6 +103,7 @@ official Claude Code GitHub App on the repo and writes the OAuth token to
 The security-review action does not currently support OAuth, so this workflow
 uses a metered API key. Add it under **Settings → Secrets and variables →
 Actions → New repository secret** as `ANTHROPIC_API_KEY`. The workflow runs
-only when a maintainer applies the **`claude-security-review`** label or
-manually dispatches the workflow — both gates require write access, so the
-key cannot be drained by drive-by PRs.
+automatically on every PR whose base branch is `main` or `develop`, and can
+also be dispatched manually. As with the code-review workflow, the
+outside-collaborator approval gate bounds drive-by API-credit burn from
+random fork PRs.

@@ -36,24 +36,25 @@ install it with `pre-commit install` if `setup-dev.sh` did not.
 
 ## Claude-driven review workflows
 
-This repository has three optional Claude-driven workflows. None of them runs
-automatically on every PR — each one is gated so that only maintainers can
-trigger it. If you would like one applied to your PR, ask a maintainer.
+This repository has three Claude-driven workflows. The first two run
+automatically on every PR; the third is interactive.
 
-- **`claude-review` label** → runs `claude-code-review.yml`, a general code
-  review that posts a single review comment on the PR. Backed by an OAuth
-  subscription (no per-run API cost).
-- **`claude-security-review` label** → runs `claude-code-security-review.yml`,
-  a deeper security-focused pass. Backed by a metered API key, so it is used
-  more sparingly than the general review.
+- **`claude-code-review.yml`** — a general code review that posts a single
+  comment on every PR (opened / synchronized / ready-for-review / reopened).
+  Backed by an OAuth subscription (no per-run API cost).
+- **`claude-security-review.yml`** — a deeper security-focused pass. Runs on
+  every PR whose base is `main` or `develop`, and can also be dispatched
+  manually by a maintainer. Backed by a metered API key.
 - **`@claude` in a comment, issue, or PR review** → invokes the interactive
   bot in `claude.yml`. The bot can read the repo, comment back, and (when
   asked) commit code changes. It only responds to authors with at least
   COLLABORATOR access — random outside users cannot drive it.
 
-Outside contributors cannot apply labels and do not have the access level
-required by the `@claude` bot, so none of these workflows can be triggered
-from untrusted fork code. See `SECURITY.md` for the full security rationale.
+Drive-by abuse from untrusted fork PRs is bounded at the repository level:
+**Settings → Actions → Fork pull-request workflows from outside collaborators**
+is set to "Require approval for all outside collaborators", so a first-time
+contributor's first workflow run must be approved by a maintainer before any
+Action executes. See `SECURITY.md` for the full security rationale.
 
 ## Reporting bugs
 

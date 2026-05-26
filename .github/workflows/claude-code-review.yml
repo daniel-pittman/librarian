@@ -1,4 +1,4 @@
-# Automated Claude code review on labeled PRs.
+# Automated Claude code review on every pull request.
 #
 # This workflow uses the OAuth-bound CLAUDE_CODE_OAUTH_TOKEN (provisioned by
 # `claude /install-github-app` from a local Claude Code session) rather than a
@@ -7,18 +7,16 @@
 #
 # Why this workflow is safe on a PUBLIC repository:
 #
-#   * Trigger is `pull_request` with `types: [labeled]` ONLY. We deliberately
-#     do NOT use `pull_request_target`: that event runs in the context of the
-#     base repository and exposes repository secrets to code from an untrusted
-#     fork PR, which is a credential-exfiltration risk. `pull_request` runs the
-#     workflow definition from the BASE branch and does not expose secrets to
-#     fork code by default.
+#   * Trigger is `pull_request`, NOT `pull_request_target`. `pull_request_target`
+#     runs in the base repository's context and exposes secrets to code from
+#     an untrusted fork PR (a credential-exfiltration risk). `pull_request`
+#     runs the workflow definition from the BASE branch and does not expose
+#     secrets to fork code by default.
 #
-#   * The job is gated on `github.event.label.name == 'claude-review'`. The
-#     review runs ONLY when a maintainer applies the `claude-review` label.
-#     Outside contributors cannot apply labels, so they cannot trigger this
-#     workflow — this is the key protection against subscription-quota burn
-#     from drive-by PRs.
+#   * "Require approval for all outside collaborators" is enabled in the
+#     repository's Actions settings. A first-time outside contributor's first
+#     workflow run must be approved by a maintainer before any Action executes,
+#     which bounds drive-by subscription-quota burn from random PRs.
 #
 #   * Permissions are scoped to what claude-code-action needs to read the PR
 #     diff, post a review comment, and request an OIDC token; no broader
@@ -35,12 +33,10 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [labeled]
+    types: [opened, synchronize, ready_for_review, reopened]
 
 jobs:
   claude-review:
-    # Gate: run only when a maintainer applies the `claude-review` label.
-    if: github.event.label.name == 'claude-review'
     runs-on: ubuntu-latest
     permissions:
       contents: read
