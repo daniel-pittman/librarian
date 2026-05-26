@@ -248,9 +248,11 @@ librarian contact garcia
 The default text output caps the `Sources:` list at three entries per contact.
 Pass `--format json` for the full, untruncated list (useful when a recurring
 collaborator appears in many entries). Browse the whole rolodex with
-`librarian contact --all`, or filter by email-domain substring with
+`librarian contact --all`, or filter by any email substring with
 `librarian contact --institution example.edu` to surface everyone at a single
-institution.
+institution (the flag is name-suggestive of the domain case but matches
+anywhere in the email — `--institution garcia` would also hit local-parts
+like `garcia@anywhere.com`).
 
 ## The MCP server
 
@@ -371,7 +373,7 @@ Run `librarian <command> --help` for command-specific options.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, the local
 checks (`ruff check`, `ruff format --check`, `pytest`), and the
-Claude-driven review workflows that run on every pull request. Security
+Claude-driven review workflows that run automatically on pull requests. Security
 issues: see [SECURITY.md](SECURITY.md) — please do not open a public issue
 for them.
 
