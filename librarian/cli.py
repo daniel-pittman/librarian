@@ -1417,12 +1417,18 @@ def cmd_remove_tags(ctx: Context, args: list[str]) -> int:
         removed = []
         to_delete = []
         for i in range(tags_idx + 1, end):
-            if not lines[i].strip().startswith("- "):
+            stripped = lines[i].strip()
+            if stripped.startswith("- "):
+                tag = stripped[2:].strip().strip("\"'")
+                if tag in drop:
+                    to_delete.append(i)
+                    removed.append(tag)
+            elif stripped == "" or stripped.startswith("#"):
+                # Mirror the scan behavior of cmd_add_tags: blank lines and
+                # `#` comment lines between items must not terminate the scan.
+                continue
+            else:
                 break
-            tag = lines[i].strip()[2:].strip().strip("\"'")
-            if tag in drop:
-                to_delete.append(i)
-                removed.append(tag)
         if not removed:
             print(f"Tags {drop} not found on '{entry_id}'")
             return 0

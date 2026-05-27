@@ -421,6 +421,63 @@ def test_remove_docs(sandbox):
     assert "https://remove.example.com" not in sandbox.entry("2025-09-committee-service")["docs"]
 
 
+def test_remove_tags_skips_blank_lines_before_items(sandbox):
+    """remove-tags must tolerate a blank line between `tags:` and the first item.
+
+    Pre-fix, the scan-loop broke on the blank line and returned ``Tags ... not
+    found`` even when the tag was present further down. Parallel to the
+    add-tags fix in the same PR.
+    """
+    text = sandbox.activities.read_text()
+    needle = "    tags:\n      - teaching\n      - cpe-primary\n      - course\n"
+    with_blank = "    tags:\n\n      - teaching\n      - cpe-primary\n      - course\n"
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_blank))
+
+    out, _, rc = sandbox.run("remove-tags", "2024-03-intro-security-course", "teaching")
+    assert rc == 0
+    assert "teaching" not in sandbox.entry("2024-03-intro-security-course")["tags"]
+    assert "cpe-primary" in sandbox.entry("2024-03-intro-security-course")["tags"]
+
+
+def test_add_docs_skips_comment_between_items(sandbox):
+    """A YAML comment between two items must not stop item collection short.
+
+    Pins the inter-item gap behavior (the existing tests cover only the
+    parent-key-to-first-item gap). Duplicate detection must still see items
+    on both sides of the comment.
+    """
+    text = sandbox.activities.read_text()
+    needle = (
+        "    docs:\n"
+        "      - 'https://example.edu/courses/infosec-101'\n"
+        "      - 'file:syllabus-infosec-101'\n"
+    )
+    with_inter_comment = (
+        "    docs:\n"
+        "      - 'https://example.edu/courses/infosec-101'\n"
+        "      # syllabus PDF\n"
+        "      - 'file:syllabus-infosec-101'\n"
+    )
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_inter_comment))
+
+    # Re-adding either flanking item must be a no-op — the scan has to see both.
+    out, _, rc = sandbox.run(
+        "add-docs",
+        "2024-03-intro-security-course",
+        "https://example.edu/courses/infosec-101",
+    )
+    assert rc == 0
+    assert "No new docs" in out
+
+    out, _, rc = sandbox.run(
+        "add-docs", "2024-03-intro-security-course", "file:syllabus-infosec-101"
+    )
+    assert rc == 0
+    assert "No new docs" in out
+
+
 # ---------------------------------------------------------------------------
 # create
 # ---------------------------------------------------------------------------
