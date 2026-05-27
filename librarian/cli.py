@@ -793,6 +793,50 @@ def _find_field_line(lines: list[str], start: int, end: int, field: str) -> int 
     return None
 
 
+def _scan_list_items(
+    lines: list[str], parent_idx: int, end: int
+) -> tuple[list[tuple[int, str]], int | None, int]:
+    """Scan the YAML list under ``parent_idx`` for its ``- item`` lines.
+
+    Walks lines after ``parent_idx`` collecting every line that starts with
+    ``- ``, skipping blank lines and ``#`` comments interleaved with items
+    (a layout YAML accepts). Stops at the first structural line that isn't
+    an item, blank, or comment — typically the next field or entry.
+
+    The blank/comment skip is load-bearing: without it ``last_item_idx``
+    would land on the first non-item line (causing add-* callers to insert
+    new items above the existing ones) and ``items`` would miss everything
+    after the gap (silently breaking duplicate detection and remove-*).
+
+    Returns three values:
+
+    - ``items``: list of ``(line_index, stripped_value)`` tuples in order.
+    - ``first_item_idx``: line index of the first item, or ``None`` if the
+      list is empty. Callers use this to read the item indent so new
+      items match the existing style (flush vs. nested).
+    - ``last_item_idx``: line index of the last item, or ``parent_idx`` if
+      the list is empty. Callers use this as the "insert after this line"
+      anchor.
+
+    Centralizes the loop shape that was previously duplicated across
+    ``cmd_add_docs``, ``cmd_add_tags`` and ``cmd_remove_tags`` — three
+    near-identical copies that had to be patched in lockstep for both the
+    same-indent (v1.1.1) and blank-line-gap (v1.1.2) fixes.
+    """
+    items: list[tuple[int, str]] = []
+    for i in range(parent_idx + 1, end):
+        stripped = lines[i].strip()
+        if stripped.startswith("- "):
+            items.append((i, stripped[2:].strip().strip("\"'")))
+        elif stripped == "" or stripped.startswith("#"):
+            continue
+        else:
+            break
+    first = items[0][0] if items else None
+    last = items[-1][0] if items else parent_idx
+    return items, first, last
+
+
 def cmd_create(ctx: Context, args: list[str]) -> int:
     """Create a new entry from JSON on stdin or ``--json``. ``create [--json ...]``
 
@@ -1344,24 +1388,9 @@ def cmd_add_tags(ctx: Context, args: list[str]) -> int:
         lines[tags_idx] = f"{indent}tags: [{', '.join(repr(t) for t in existing)}]\n"
     else:
         # Multi-line list (or empty `[]`): collect existing item lines.
-        item_lines = []
-        first_item_idx = None
-        last_item_idx = tags_idx
-        for i in range(tags_idx + 1, end):
-            stripped = lines[i].strip()
-            if stripped.startswith("- "):
-                if first_item_idx is None:
-                    first_item_idx = i
-                item_lines.append(stripped[2:].strip().strip("\"'"))
-                last_item_idx = i
-            elif stripped == "" or stripped.startswith("#"):
-                # Skip blank lines and comments interleaved with items, so a
-                # `tags:`/`#comment`/`- item` shape doesn't truncate the scan
-                # and cause new items to be inserted above the existing ones.
-                continue
-            else:
-                break
-        added = [t for t in new_tags if t not in item_lines]
+        items, first_item_idx, last_item_idx = _scan_list_items(lines, tags_idx, end)
+        existing = [v for _, v in items]
+        added = [t for t in new_tags if t not in existing]
         if not added:
             print(f"No new tags to add — all already present on '{entry_id}'")
             return 0
@@ -1414,21 +1443,13 @@ def cmd_remove_tags(ctx: Context, args: list[str]) -> int:
         remaining = [t for t in existing if t not in drop]
         lines[tags_idx] = f"{indent}tags: [{', '.join(repr(t) for t in remaining)}]\n"
     else:
-        removed = []
-        to_delete = []
-        for i in range(tags_idx + 1, end):
-            stripped = lines[i].strip()
-            if stripped.startswith("- "):
-                tag = stripped[2:].strip().strip("\"'")
-                if tag in drop:
-                    to_delete.append(i)
-                    removed.append(tag)
-            elif stripped == "" or stripped.startswith("#"):
-                # Mirror the scan behavior of cmd_add_tags: blank lines and
-                # `#` comment lines between items must not terminate the scan.
-                continue
-            else:
-                break
+        items, _, _ = _scan_list_items(lines, tags_idx, end)
+        # Single pass — keeping `to_delete` (line indices) and `removed`
+        # (tag values) in sync via two separate list comprehensions over
+        # `items` would invite drift if the match predicate ever grew.
+        matches = [(idx, tag) for idx, tag in items if tag in drop]
+        to_delete = [idx for idx, _ in matches]
+        removed = [tag for _, tag in matches]
         if not removed:
             print(f"Tags {drop} not found on '{entry_id}'")
             return 0
@@ -1469,23 +1490,8 @@ def cmd_add_docs(ctx: Context, args: list[str]) -> int:
         lines[docs_idx : docs_idx + 1] = new_lines
         added = list(new_docs)
     else:
-        existing = []
-        last = docs_idx
-        first_item_idx = None
-        for i in range(docs_idx + 1, end):
-            stripped = lines[i].strip()
-            if stripped.startswith("- "):
-                if first_item_idx is None:
-                    first_item_idx = i
-                existing.append(stripped[2:].strip().strip("\"'"))
-                last = i
-            elif stripped == "" or stripped.startswith("#"):
-                # Skip blank lines and comments interleaved with items, so a
-                # `docs:`/`#comment`/`- item` shape doesn't truncate the scan
-                # and cause new items to be inserted above the existing ones.
-                continue
-            else:
-                break
+        items, first_item_idx, last_item_idx = _scan_list_items(lines, docs_idx, end)
+        existing = [v for _, v in items]
         # YAML accepts list items at the same indent as the parent key OR two
         # deeper. Match whichever style the existing items use; if there are
         # none, default to the deeper (nested) style.
@@ -1495,7 +1501,7 @@ def cmd_add_docs(ctx: Context, args: list[str]) -> int:
             item_indent = indent + "  "
         added = [d for d in new_docs if d not in existing]
         for offset, doc in enumerate(added):
-            lines.insert(last + 1 + offset, f'{item_indent}- "{doc}"\n')
+            lines.insert(last_item_idx + 1 + offset, f'{item_indent}- "{doc}"\n')
         if not added:
             print(f"No new docs to add — all already present on '{entry_id}'")
             return 0
