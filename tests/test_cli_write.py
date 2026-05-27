@@ -284,6 +284,54 @@ def test_add_docs_no_duplicates(sandbox):
     assert "No new docs" in out
 
 
+def test_add_docs_preserves_same_indent_list_style(sandbox):
+    """Items written at the same indent as their parent key must stay valid.
+
+    YAML accepts list items at the parent key's indent OR two deeper. The
+    fixtures use the nested style, so this test first rewrites one entry's
+    ``docs:`` block to use the flush style (items at the same column as
+    ``docs:``), then runs ``add-docs`` and re-parses to confirm the file
+    is still valid YAML and the new doc landed in the right place.
+    """
+    text = sandbox.activities.read_text()
+    # Flatten the existing 6-space-indented items under this entry's docs:
+    # to 4-space indent so they sit at the same column as `docs:` itself.
+    needle = (
+        "    docs:\n"
+        "      - 'https://example.edu/courses/infosec-101'\n"
+        "      - 'file:syllabus-infosec-101'\n"
+    )
+    flush = (
+        "    docs:\n"
+        "    - 'https://example.edu/courses/infosec-101'\n"
+        '    - "file:syllabus-infosec-101"\n'
+    )
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, flush))
+
+    out, _, rc = sandbox.run("add-docs", "2024-03-intro-security-course", "file:new-doc-ref")
+    assert rc == 0
+    # Must re-parse cleanly — pre-fix this raised a ParserError.
+    docs = sandbox.entry("2024-03-intro-security-course")["docs"]
+    assert "file:new-doc-ref" in docs
+    assert "file:syllabus-infosec-101" in docs
+
+
+def test_add_tags_preserves_same_indent_list_style(sandbox):
+    """add-tags must also match the existing item indent (parallel to add-docs)."""
+    text = sandbox.activities.read_text()
+    needle = "    tags:\n      - teaching\n      - cpe-primary\n      - course\n"
+    flush = "    tags:\n    - teaching\n    - cpe-primary\n    - course\n"
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, flush))
+
+    out, _, rc = sandbox.run("add-tags", "2024-03-intro-security-course", "flush-style")
+    assert rc == 0
+    tags = sandbox.entry("2024-03-intro-security-course")["tags"]
+    assert "flush-style" in tags
+    assert {"teaching", "cpe-primary", "course"} <= set(tags)
+
+
 def test_remove_docs(sandbox):
     """remove-docs deletes a doc reference."""
     sandbox.run("add-docs", "2025-09-committee-service", "https://remove.example.com")
