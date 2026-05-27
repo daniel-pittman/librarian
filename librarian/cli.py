@@ -1345,8 +1345,11 @@ def cmd_add_tags(ctx: Context, args: list[str]) -> int:
     else:
         # Multi-line list (or empty `[]`): collect existing item lines.
         item_lines = []
+        first_item_idx = None
         i = tags_idx + 1
         while i < end and lines[i].strip().startswith("- "):
+            if first_item_idx is None:
+                first_item_idx = i
             item_lines.append(lines[i].strip()[2:].strip().strip("\"'"))
             i += 1
         added = [t for t in new_tags if t not in item_lines]
@@ -1355,7 +1358,13 @@ def cmd_add_tags(ctx: Context, args: list[str]) -> int:
             return 0
         if content == "[]":
             lines[tags_idx] = f"{indent}tags:\n"
-        item_indent = indent + "  "
+        # YAML accepts list items at the same indent as the parent key OR two
+        # deeper. Match whichever style the existing items use; if there are
+        # none, default to the deeper (nested) style.
+        if first_item_idx is not None:
+            item_indent = " " * line_indent(lines[first_item_idx])
+        else:
+            item_indent = indent + "  "
         insert_at = tags_idx + 1 + len(item_lines)
         for offset, tag in enumerate(added):
             lines.insert(insert_at + offset, f"{item_indent}- {tag}\n")
@@ -1447,13 +1456,22 @@ def cmd_add_docs(ctx: Context, args: list[str]) -> int:
     else:
         existing = []
         last = docs_idx
+        first_item_idx = None
         for i in range(docs_idx + 1, end):
             if lines[i].strip().startswith("- "):
+                if first_item_idx is None:
+                    first_item_idx = i
                 existing.append(lines[i].strip()[2:].strip().strip("\"'"))
                 last = i
             else:
                 break
-        item_indent = indent + "  "
+        # YAML accepts list items at the same indent as the parent key OR two
+        # deeper. Match whichever style the existing items use; if there are
+        # none, default to the deeper (nested) style.
+        if first_item_idx is not None:
+            item_indent = " " * line_indent(lines[first_item_idx])
+        else:
+            item_indent = indent + "  "
         added = [d for d in new_docs if d not in existing]
         for offset, doc in enumerate(added):
             lines.insert(last + 1 + offset, f'{item_indent}- "{doc}"\n')
