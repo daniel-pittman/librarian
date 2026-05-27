@@ -332,6 +332,85 @@ def test_add_tags_preserves_same_indent_list_style(sandbox):
     assert {"teaching", "cpe-primary", "course"} <= set(tags)
 
 
+def test_add_docs_skips_blank_lines_before_items(sandbox):
+    """A blank line between `docs:` and the first item must not truncate the scan.
+
+    Pre-fix: the item-collection loop broke on the blank line, treated the
+    list as empty, and inserted the new item between the parent key and the
+    existing items — silently changing the list order and breaking duplicate
+    detection.
+    """
+    text = sandbox.activities.read_text()
+    needle = (
+        "    docs:\n"
+        "      - 'https://example.edu/courses/infosec-101'\n"
+        "      - 'file:syllabus-infosec-101'\n"
+    )
+    with_blank = (
+        "    docs:\n"
+        "\n"
+        "      - 'https://example.edu/courses/infosec-101'\n"
+        "      - 'file:syllabus-infosec-101'\n"
+    )
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_blank))
+
+    out, _, rc = sandbox.run("add-docs", "2024-03-intro-security-course", "file:appended")
+    assert rc == 0
+    docs = sandbox.entry("2024-03-intro-security-course")["docs"]
+    assert docs[-1] == "file:appended"
+    assert docs[0] == "https://example.edu/courses/infosec-101"
+    assert docs[1] == "file:syllabus-infosec-101"
+
+    # Duplicate detection must work across the blank-line gap.
+    out, _, rc = sandbox.run(
+        "add-docs", "2024-03-intro-security-course", "file:syllabus-infosec-101"
+    )
+    assert rc == 0
+    assert "No new docs" in out
+
+
+def test_add_tags_skips_blank_lines_before_items(sandbox):
+    """add-tags must also tolerate a blank line between `tags:` and the first item."""
+    text = sandbox.activities.read_text()
+    needle = "    tags:\n      - teaching\n      - cpe-primary\n      - course\n"
+    with_blank = "    tags:\n\n      - teaching\n      - cpe-primary\n      - course\n"
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_blank))
+
+    sandbox.run("add-tags", "2024-03-intro-security-course", "appended-tag")
+    tags = sandbox.entry("2024-03-intro-security-course")["tags"]
+    assert tags[-1] == "appended-tag"
+    assert tags[:3] == ["teaching", "cpe-primary", "course"]
+
+    out, _, rc = sandbox.run("add-tags", "2024-03-intro-security-course", "teaching")
+    assert rc == 0
+    assert "already present" in out.lower()
+
+
+def test_add_docs_skips_comment_line_before_items(sandbox):
+    """A YAML comment between `docs:` and the first item is also tolerated."""
+    text = sandbox.activities.read_text()
+    needle = (
+        "    docs:\n"
+        "      - 'https://example.edu/courses/infosec-101'\n"
+        "      - 'file:syllabus-infosec-101'\n"
+    )
+    with_comment = (
+        "    docs:\n"
+        "      # canonical course materials\n"
+        "      - 'https://example.edu/courses/infosec-101'\n"
+        "      - 'file:syllabus-infosec-101'\n"
+    )
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_comment))
+
+    sandbox.run("add-docs", "2024-03-intro-security-course", "file:appended")
+    docs = sandbox.entry("2024-03-intro-security-course")["docs"]
+    assert docs[-1] == "file:appended"
+    assert docs[0] == "https://example.edu/courses/infosec-101"
+
+
 def test_remove_docs(sandbox):
     """remove-docs deletes a doc reference."""
     sandbox.run("add-docs", "2025-09-committee-service", "https://remove.example.com")
@@ -340,6 +419,63 @@ def test_remove_docs(sandbox):
     )
     assert rc == 0
     assert "https://remove.example.com" not in sandbox.entry("2025-09-committee-service")["docs"]
+
+
+def test_remove_tags_skips_blank_lines_before_items(sandbox):
+    """remove-tags must tolerate a blank line between `tags:` and the first item.
+
+    Pre-fix, the scan-loop broke on the blank line and returned ``Tags ... not
+    found`` even when the tag was present further down. Parallel to the
+    add-tags fix in the same PR.
+    """
+    text = sandbox.activities.read_text()
+    needle = "    tags:\n      - teaching\n      - cpe-primary\n      - course\n"
+    with_blank = "    tags:\n\n      - teaching\n      - cpe-primary\n      - course\n"
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_blank))
+
+    out, _, rc = sandbox.run("remove-tags", "2024-03-intro-security-course", "teaching")
+    assert rc == 0
+    assert "teaching" not in sandbox.entry("2024-03-intro-security-course")["tags"]
+    assert "cpe-primary" in sandbox.entry("2024-03-intro-security-course")["tags"]
+
+
+def test_add_docs_skips_comment_between_items(sandbox):
+    """A YAML comment between two items must not stop item collection short.
+
+    Pins the inter-item gap behavior (the existing tests cover only the
+    parent-key-to-first-item gap). Duplicate detection must still see items
+    on both sides of the comment.
+    """
+    text = sandbox.activities.read_text()
+    needle = (
+        "    docs:\n"
+        "      - 'https://example.edu/courses/infosec-101'\n"
+        "      - 'file:syllabus-infosec-101'\n"
+    )
+    with_inter_comment = (
+        "    docs:\n"
+        "      - 'https://example.edu/courses/infosec-101'\n"
+        "      # syllabus PDF\n"
+        "      - 'file:syllabus-infosec-101'\n"
+    )
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_inter_comment))
+
+    # Re-adding either flanking item must be a no-op — the scan has to see both.
+    out, _, rc = sandbox.run(
+        "add-docs",
+        "2024-03-intro-security-course",
+        "https://example.edu/courses/infosec-101",
+    )
+    assert rc == 0
+    assert "No new docs" in out
+
+    out, _, rc = sandbox.run(
+        "add-docs", "2024-03-intro-security-course", "file:syllabus-infosec-101"
+    )
+    assert rc == 0
+    assert "No new docs" in out
 
 
 # ---------------------------------------------------------------------------

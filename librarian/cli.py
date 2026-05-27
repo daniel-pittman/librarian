@@ -1346,12 +1346,21 @@ def cmd_add_tags(ctx: Context, args: list[str]) -> int:
         # Multi-line list (or empty `[]`): collect existing item lines.
         item_lines = []
         first_item_idx = None
-        i = tags_idx + 1
-        while i < end and lines[i].strip().startswith("- "):
-            if first_item_idx is None:
-                first_item_idx = i
-            item_lines.append(lines[i].strip()[2:].strip().strip("\"'"))
-            i += 1
+        last_item_idx = tags_idx
+        for i in range(tags_idx + 1, end):
+            stripped = lines[i].strip()
+            if stripped.startswith("- "):
+                if first_item_idx is None:
+                    first_item_idx = i
+                item_lines.append(stripped[2:].strip().strip("\"'"))
+                last_item_idx = i
+            elif stripped == "" or stripped.startswith("#"):
+                # Skip blank lines and comments interleaved with items, so a
+                # `tags:`/`#comment`/`- item` shape doesn't truncate the scan
+                # and cause new items to be inserted above the existing ones.
+                continue
+            else:
+                break
         added = [t for t in new_tags if t not in item_lines]
         if not added:
             print(f"No new tags to add — all already present on '{entry_id}'")
@@ -1365,7 +1374,7 @@ def cmd_add_tags(ctx: Context, args: list[str]) -> int:
             item_indent = " " * line_indent(lines[first_item_idx])
         else:
             item_indent = indent + "  "
-        insert_at = tags_idx + 1 + len(item_lines)
+        insert_at = last_item_idx + 1
         for offset, tag in enumerate(added):
             lines.insert(insert_at + offset, f"{item_indent}- {tag}\n")
     write_lines(ctx.paths.activities, lines)
@@ -1408,12 +1417,18 @@ def cmd_remove_tags(ctx: Context, args: list[str]) -> int:
         removed = []
         to_delete = []
         for i in range(tags_idx + 1, end):
-            if not lines[i].strip().startswith("- "):
+            stripped = lines[i].strip()
+            if stripped.startswith("- "):
+                tag = stripped[2:].strip().strip("\"'")
+                if tag in drop:
+                    to_delete.append(i)
+                    removed.append(tag)
+            elif stripped == "" or stripped.startswith("#"):
+                # Mirror the scan behavior of cmd_add_tags: blank lines and
+                # `#` comment lines between items must not terminate the scan.
+                continue
+            else:
                 break
-            tag = lines[i].strip()[2:].strip().strip("\"'")
-            if tag in drop:
-                to_delete.append(i)
-                removed.append(tag)
         if not removed:
             print(f"Tags {drop} not found on '{entry_id}'")
             return 0
@@ -1458,11 +1473,17 @@ def cmd_add_docs(ctx: Context, args: list[str]) -> int:
         last = docs_idx
         first_item_idx = None
         for i in range(docs_idx + 1, end):
-            if lines[i].strip().startswith("- "):
+            stripped = lines[i].strip()
+            if stripped.startswith("- "):
                 if first_item_idx is None:
                     first_item_idx = i
-                existing.append(lines[i].strip()[2:].strip().strip("\"'"))
+                existing.append(stripped[2:].strip().strip("\"'"))
                 last = i
+            elif stripped == "" or stripped.startswith("#"):
+                # Skip blank lines and comments interleaved with items, so a
+                # `docs:`/`#comment`/`- item` shape doesn't truncate the scan
+                # and cause new items to be inserted above the existing ones.
+                continue
             else:
                 break
         # YAML accepts list items at the same indent as the parent key OR two
