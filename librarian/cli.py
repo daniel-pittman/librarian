@@ -803,6 +803,11 @@ def _scan_list_items(
     (a layout YAML accepts). Stops at the first structural line that isn't
     an item, blank, or comment — typically the next field or entry.
 
+    The blank/comment skip is load-bearing: without it ``last_item_idx``
+    would land on the first non-item line (causing add-* callers to insert
+    new items above the existing ones) and ``items`` would miss everything
+    after the gap (silently breaking duplicate detection and remove-*).
+
     Returns three values:
 
     - ``items``: list of ``(line_index, stripped_value)`` tuples in order.
@@ -1439,8 +1444,12 @@ def cmd_remove_tags(ctx: Context, args: list[str]) -> int:
         lines[tags_idx] = f"{indent}tags: [{', '.join(repr(t) for t in remaining)}]\n"
     else:
         items, _, _ = _scan_list_items(lines, tags_idx, end)
-        to_delete = [idx for idx, tag in items if tag in drop]
-        removed = [tag for _, tag in items if tag in drop]
+        # Single pass — keeping `to_delete` (line indices) and `removed`
+        # (tag values) in sync via two separate list comprehensions over
+        # `items` would invite drift if the match predicate ever grew.
+        matches = [(idx, tag) for idx, tag in items if tag in drop]
+        to_delete = [idx for idx, _ in matches]
+        removed = [tag for _, tag in matches]
         if not removed:
             print(f"Tags {drop} not found on '{entry_id}'")
             return 0

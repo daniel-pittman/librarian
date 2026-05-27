@@ -478,6 +478,80 @@ def test_add_docs_skips_comment_between_items(sandbox):
     assert "No new docs" in out
 
 
+def test_add_tags_skips_comment_line_before_items(sandbox):
+    """add-tags must tolerate a `#` comment between `tags:` and the first item.
+
+    Parity with the add-docs comment coverage. Pre-refactor, three separate
+    loops meant each caller had its own implicit coverage; the helper now
+    lives in one place, so each caller must pin its own regression test.
+    """
+    text = sandbox.activities.read_text()
+    needle = "    tags:\n      - teaching\n      - cpe-primary\n      - course\n"
+    with_comment = (
+        "    tags:\n"
+        "      # primary teaching tags\n"
+        "      - teaching\n"
+        "      - cpe-primary\n"
+        "      - course\n"
+    )
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_comment))
+
+    sandbox.run("add-tags", "2024-03-intro-security-course", "appended-tag")
+    tags = sandbox.entry("2024-03-intro-security-course")["tags"]
+    assert tags[-1] == "appended-tag"
+    assert tags[:3] == ["teaching", "cpe-primary", "course"]
+
+    out, _, rc = sandbox.run("add-tags", "2024-03-intro-security-course", "teaching")
+    assert rc == 0
+    assert "already present" in out.lower()
+
+
+def test_add_tags_skips_comment_between_items(sandbox):
+    """Inter-item `#` comments must not truncate the add-tags scan."""
+    text = sandbox.activities.read_text()
+    needle = "    tags:\n      - teaching\n      - cpe-primary\n      - course\n"
+    with_inter_comment = (
+        "    tags:\n"
+        "      - teaching\n"
+        "      # promotion-and-tenure category\n"
+        "      - cpe-primary\n"
+        "      - course\n"
+    )
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_inter_comment))
+
+    out, _, rc = sandbox.run("add-tags", "2024-03-intro-security-course", "cpe-primary")
+    assert rc == 0
+    assert "already present" in out.lower()
+
+    out, _, rc = sandbox.run("add-tags", "2024-03-intro-security-course", "course")
+    assert rc == 0
+    assert "already present" in out.lower()
+
+
+def test_remove_tags_skips_comment_between_items(sandbox):
+    """remove-tags must find items on both sides of an inter-item `#` comment."""
+    text = sandbox.activities.read_text()
+    needle = "    tags:\n      - teaching\n      - cpe-primary\n      - course\n"
+    with_inter_comment = (
+        "    tags:\n"
+        "      - teaching\n"
+        "      # promotion-and-tenure category\n"
+        "      - cpe-primary\n"
+        "      - course\n"
+    )
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_inter_comment))
+
+    out, _, rc = sandbox.run("remove-tags", "2024-03-intro-security-course", "course")
+    assert rc == 0
+    tags = sandbox.entry("2024-03-intro-security-course")["tags"]
+    assert "course" not in tags
+    assert "teaching" in tags
+    assert "cpe-primary" in tags
+
+
 # ---------------------------------------------------------------------------
 # create
 # ---------------------------------------------------------------------------
