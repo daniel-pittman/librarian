@@ -373,6 +373,11 @@ default.
 
 Run `librarian <command> --help` for command-specific options.
 
+**Entry ids** must be slugs — lowercase letters, digits and hyphens, at least
+two characters (e.g. `2026-03-launch`). `create` and `rename-id` reject other
+shapes so ids stay unambiguous in cross-references and round-trip safely
+through the space-delimited change ledger.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, the local
