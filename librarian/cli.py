@@ -1025,7 +1025,11 @@ def cmd_create(ctx: Context, args: list[str]) -> int:
         print(f"ERROR: missing required fields: {missing}")
         return 1
 
-    if not _is_valid_id(str(data["id"])):
+    # Require a genuine string id: a bare-integer JSON id (e.g. 20260728)
+    # would stringify cleanly here but persist as an int, and the ledger keys
+    # on the stringified token — so the --changed-since lookup would then miss
+    # it (the same silent-drop class as a whitespace id).
+    if not isinstance(data["id"], str) or not _is_valid_id(data["id"]):
         print(f"ERROR: '{data['id']}' is not a valid id (lowercase, digits, hyphens)")
         return 1
 

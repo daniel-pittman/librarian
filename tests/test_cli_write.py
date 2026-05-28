@@ -641,6 +641,20 @@ def test_create_rejects_uppercase_id(sandbox):
     assert "not a valid id" in out.lower()
 
 
+def test_create_rejects_integer_id(sandbox):
+    """A bare-integer JSON id is rejected (it would persist as a non-string).
+
+    `str(20260728)` matches the slug regex, but the entry would round-trip as
+    an int while the ledger keys on the string token — silently dropping it
+    from --changed-since. The id must be a genuine string.
+    """
+    data = _new_entry()
+    data["id"] = 20260728  # intentional non-string id
+    out, _, rc = sandbox.run("create", stdin=json.dumps(data))
+    assert rc == 1
+    assert "not a valid id" in out.lower()
+
+
 def test_create_accepts_slug_id(sandbox):
     """A normal slug id is accepted and round-trips through --changed-since.
 
