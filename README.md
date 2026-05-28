@@ -83,7 +83,11 @@ by a **pluggable schema** you choose. It ships as:
 - **Schema validation** — `validate` flags bad enum values, missing required
   fields, duplicate ids, dangling cross-references, and inventory problems.
 - **Change ledger** — every write is appended to an audit log; poll "what
-  changed since I last looked?" with `changes`.
+  changed since I last looked?" with `changes`. `search`, `filter`, and `list`
+  also accept `--changed-since` / `--changed-until` to intersect a query with
+  the ledger — e.g. `filter --tag grant --changed-since 2026-05-01` returns
+  only the grant entries changed since you last pulled, which is handy whenever
+  you need to export updates into an external system.
 - **File inventory** — track supporting artifacts (PDFs, posters, certificates)
   in a normalized registry, with sha256 de-duplication.
 - **Contact rolodex** — auto-built index of the people you collaborate with,
@@ -368,6 +372,11 @@ default.
 `file-update`, `file-rehash`, `file-search`
 
 Run `librarian <command> --help` for command-specific options.
+
+**Entry ids** must be slugs — lowercase letters, digits and hyphens, at least
+two characters (e.g. `2026-03-launch`). `create` and `rename-id` reject other
+shapes so ids stay unambiguous in cross-references and round-trip safely
+through the space-delimited change ledger.
 
 ## Contributing
 

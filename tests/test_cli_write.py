@@ -284,6 +284,133 @@ def test_add_docs_no_duplicates(sandbox):
     assert "No new docs" in out
 
 
+def test_add_docs_preserves_same_indent_list_style(sandbox):
+    """Items written at the same indent as their parent key must stay valid.
+
+    YAML accepts list items at the parent key's indent OR two deeper. The
+    fixtures use the nested style, so this test first rewrites one entry's
+    ``docs:`` block to use the flush style (items at the same column as
+    ``docs:``), then runs ``add-docs`` and re-parses to confirm the file
+    is still valid YAML and the new doc landed in the right place.
+    """
+    text = sandbox.activities.read_text()
+    # Flatten the existing 6-space-indented items under this entry's docs:
+    # to 4-space indent so they sit at the same column as `docs:` itself.
+    needle = (
+        "    docs:\n"
+        "      - 'https://example.edu/courses/infosec-101'\n"
+        "      - 'file:syllabus-infosec-101'\n"
+    )
+    flush = (
+        "    docs:\n"
+        "    - 'https://example.edu/courses/infosec-101'\n"
+        '    - "file:syllabus-infosec-101"\n'
+    )
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, flush))
+
+    out, _, rc = sandbox.run("add-docs", "2024-03-intro-security-course", "file:new-doc-ref")
+    assert rc == 0
+    # Must re-parse cleanly — pre-fix this raised a ParserError.
+    docs = sandbox.entry("2024-03-intro-security-course")["docs"]
+    assert "file:new-doc-ref" in docs
+    assert "file:syllabus-infosec-101" in docs
+
+
+def test_add_tags_preserves_same_indent_list_style(sandbox):
+    """add-tags must also match the existing item indent (parallel to add-docs)."""
+    text = sandbox.activities.read_text()
+    needle = "    tags:\n      - teaching\n      - cpe-primary\n      - course\n"
+    flush = "    tags:\n    - teaching\n    - cpe-primary\n    - course\n"
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, flush))
+
+    out, _, rc = sandbox.run("add-tags", "2024-03-intro-security-course", "flush-style")
+    assert rc == 0
+    tags = sandbox.entry("2024-03-intro-security-course")["tags"]
+    assert "flush-style" in tags
+    assert {"teaching", "cpe-primary", "course"} <= set(tags)
+
+
+def test_add_docs_skips_blank_lines_before_items(sandbox):
+    """A blank line between `docs:` and the first item must not truncate the scan.
+
+    Pre-fix: the item-collection loop broke on the blank line, treated the
+    list as empty, and inserted the new item between the parent key and the
+    existing items — silently changing the list order and breaking duplicate
+    detection.
+    """
+    text = sandbox.activities.read_text()
+    needle = (
+        "    docs:\n"
+        "      - 'https://example.edu/courses/infosec-101'\n"
+        "      - 'file:syllabus-infosec-101'\n"
+    )
+    with_blank = (
+        "    docs:\n"
+        "\n"
+        "      - 'https://example.edu/courses/infosec-101'\n"
+        "      - 'file:syllabus-infosec-101'\n"
+    )
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_blank))
+
+    out, _, rc = sandbox.run("add-docs", "2024-03-intro-security-course", "file:appended")
+    assert rc == 0
+    docs = sandbox.entry("2024-03-intro-security-course")["docs"]
+    assert docs[-1] == "file:appended"
+    assert docs[0] == "https://example.edu/courses/infosec-101"
+    assert docs[1] == "file:syllabus-infosec-101"
+
+    # Duplicate detection must work across the blank-line gap.
+    out, _, rc = sandbox.run(
+        "add-docs", "2024-03-intro-security-course", "file:syllabus-infosec-101"
+    )
+    assert rc == 0
+    assert "No new docs" in out
+
+
+def test_add_tags_skips_blank_lines_before_items(sandbox):
+    """add-tags must also tolerate a blank line between `tags:` and the first item."""
+    text = sandbox.activities.read_text()
+    needle = "    tags:\n      - teaching\n      - cpe-primary\n      - course\n"
+    with_blank = "    tags:\n\n      - teaching\n      - cpe-primary\n      - course\n"
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_blank))
+
+    sandbox.run("add-tags", "2024-03-intro-security-course", "appended-tag")
+    tags = sandbox.entry("2024-03-intro-security-course")["tags"]
+    assert tags[-1] == "appended-tag"
+    assert tags[:3] == ["teaching", "cpe-primary", "course"]
+
+    out, _, rc = sandbox.run("add-tags", "2024-03-intro-security-course", "teaching")
+    assert rc == 0
+    assert "already present" in out.lower()
+
+
+def test_add_docs_skips_comment_line_before_items(sandbox):
+    """A YAML comment between `docs:` and the first item is also tolerated."""
+    text = sandbox.activities.read_text()
+    needle = (
+        "    docs:\n"
+        "      - 'https://example.edu/courses/infosec-101'\n"
+        "      - 'file:syllabus-infosec-101'\n"
+    )
+    with_comment = (
+        "    docs:\n"
+        "      # canonical course materials\n"
+        "      - 'https://example.edu/courses/infosec-101'\n"
+        "      - 'file:syllabus-infosec-101'\n"
+    )
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_comment))
+
+    sandbox.run("add-docs", "2024-03-intro-security-course", "file:appended")
+    docs = sandbox.entry("2024-03-intro-security-course")["docs"]
+    assert docs[-1] == "file:appended"
+    assert docs[0] == "https://example.edu/courses/infosec-101"
+
+
 def test_remove_docs(sandbox):
     """remove-docs deletes a doc reference."""
     sandbox.run("add-docs", "2025-09-committee-service", "https://remove.example.com")
@@ -292,6 +419,137 @@ def test_remove_docs(sandbox):
     )
     assert rc == 0
     assert "https://remove.example.com" not in sandbox.entry("2025-09-committee-service")["docs"]
+
+
+def test_remove_tags_skips_blank_lines_before_items(sandbox):
+    """remove-tags must tolerate a blank line between `tags:` and the first item.
+
+    Pre-fix, the scan-loop broke on the blank line and returned ``Tags ... not
+    found`` even when the tag was present further down. Parallel to the
+    add-tags fix in the same PR.
+    """
+    text = sandbox.activities.read_text()
+    needle = "    tags:\n      - teaching\n      - cpe-primary\n      - course\n"
+    with_blank = "    tags:\n\n      - teaching\n      - cpe-primary\n      - course\n"
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_blank))
+
+    out, _, rc = sandbox.run("remove-tags", "2024-03-intro-security-course", "teaching")
+    assert rc == 0
+    assert "teaching" not in sandbox.entry("2024-03-intro-security-course")["tags"]
+    assert "cpe-primary" in sandbox.entry("2024-03-intro-security-course")["tags"]
+
+
+def test_add_docs_skips_comment_between_items(sandbox):
+    """A YAML comment between two items must not stop item collection short.
+
+    Pins the inter-item gap behavior (the existing tests cover only the
+    parent-key-to-first-item gap). Duplicate detection must still see items
+    on both sides of the comment.
+    """
+    text = sandbox.activities.read_text()
+    needle = (
+        "    docs:\n"
+        "      - 'https://example.edu/courses/infosec-101'\n"
+        "      - 'file:syllabus-infosec-101'\n"
+    )
+    with_inter_comment = (
+        "    docs:\n"
+        "      - 'https://example.edu/courses/infosec-101'\n"
+        "      # syllabus PDF\n"
+        "      - 'file:syllabus-infosec-101'\n"
+    )
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_inter_comment))
+
+    # Re-adding either flanking item must be a no-op — the scan has to see both.
+    out, _, rc = sandbox.run(
+        "add-docs",
+        "2024-03-intro-security-course",
+        "https://example.edu/courses/infosec-101",
+    )
+    assert rc == 0
+    assert "No new docs" in out
+
+    out, _, rc = sandbox.run(
+        "add-docs", "2024-03-intro-security-course", "file:syllabus-infosec-101"
+    )
+    assert rc == 0
+    assert "No new docs" in out
+
+
+def test_add_tags_skips_comment_line_before_items(sandbox):
+    """add-tags must tolerate a `#` comment between `tags:` and the first item.
+
+    Parity with the add-docs comment coverage. Pre-refactor, three separate
+    loops meant each caller had its own implicit coverage; the helper now
+    lives in one place, so each caller must pin its own regression test.
+    """
+    text = sandbox.activities.read_text()
+    needle = "    tags:\n      - teaching\n      - cpe-primary\n      - course\n"
+    with_comment = (
+        "    tags:\n"
+        "      # primary teaching tags\n"
+        "      - teaching\n"
+        "      - cpe-primary\n"
+        "      - course\n"
+    )
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_comment))
+
+    sandbox.run("add-tags", "2024-03-intro-security-course", "appended-tag")
+    tags = sandbox.entry("2024-03-intro-security-course")["tags"]
+    assert tags[-1] == "appended-tag"
+    assert tags[:3] == ["teaching", "cpe-primary", "course"]
+
+    out, _, rc = sandbox.run("add-tags", "2024-03-intro-security-course", "teaching")
+    assert rc == 0
+    assert "already present" in out.lower()
+
+
+def test_add_tags_skips_comment_between_items(sandbox):
+    """Inter-item `#` comments must not truncate the add-tags scan."""
+    text = sandbox.activities.read_text()
+    needle = "    tags:\n      - teaching\n      - cpe-primary\n      - course\n"
+    with_inter_comment = (
+        "    tags:\n"
+        "      - teaching\n"
+        "      # promotion-and-tenure category\n"
+        "      - cpe-primary\n"
+        "      - course\n"
+    )
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_inter_comment))
+
+    out, _, rc = sandbox.run("add-tags", "2024-03-intro-security-course", "cpe-primary")
+    assert rc == 0
+    assert "already present" in out.lower()
+
+    out, _, rc = sandbox.run("add-tags", "2024-03-intro-security-course", "course")
+    assert rc == 0
+    assert "already present" in out.lower()
+
+
+def test_remove_tags_skips_comment_between_items(sandbox):
+    """remove-tags must find items on both sides of an inter-item `#` comment."""
+    text = sandbox.activities.read_text()
+    needle = "    tags:\n      - teaching\n      - cpe-primary\n      - course\n"
+    with_inter_comment = (
+        "    tags:\n"
+        "      - teaching\n"
+        "      # promotion-and-tenure category\n"
+        "      - cpe-primary\n"
+        "      - course\n"
+    )
+    assert needle in text, "fixture layout changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, with_inter_comment))
+
+    out, _, rc = sandbox.run("remove-tags", "2024-03-intro-security-course", "course")
+    assert rc == 0
+    tags = sandbox.entry("2024-03-intro-security-course")["tags"]
+    assert "course" not in tags
+    assert "teaching" in tags
+    assert "cpe-primary" in tags
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +620,52 @@ def test_create_rejects_missing_required(sandbox):
     out, _, rc = sandbox.run("create", stdin=json.dumps(data))
     assert rc == 1
     assert "missing required" in out.lower()
+
+
+def test_create_rejects_whitespace_id(sandbox):
+    """create refuses an id with whitespace.
+
+    The change ledger is space-delimited, so a whitespace id would be
+    truncated when parsed back and silently dropped by --changed-since. The
+    id must be a ledger-safe slug.
+    """
+    out, _, rc = sandbox.run("create", stdin=json.dumps(_new_entry(id="my entry")))
+    assert rc == 1
+    assert "not a valid id" in out.lower()
+
+
+def test_create_rejects_uppercase_id(sandbox):
+    """create enforces the same slug rule as rename-id (lowercase only)."""
+    out, _, rc = sandbox.run("create", stdin=json.dumps(_new_entry(id="2026-07-MixedCase")))
+    assert rc == 1
+    assert "not a valid id" in out.lower()
+
+
+def test_create_rejects_integer_id(sandbox):
+    """A bare-integer JSON id is rejected (it would persist as a non-string).
+
+    `str(20260728)` matches the slug regex, but the entry would round-trip as
+    an int while the ledger keys on the string token — silently dropping it
+    from --changed-since. The id must be a genuine string.
+    """
+    data = _new_entry()
+    data["id"] = 20260728  # intentional non-string id
+    out, _, rc = sandbox.run("create", stdin=json.dumps(data))
+    assert rc == 1
+    assert "not a valid id" in out.lower()
+
+
+def test_create_accepts_slug_id(sandbox):
+    """A normal slug id is accepted and round-trips through --changed-since.
+
+    Guards the end-to-end path the validation protects: a created entry must
+    be findable by its full id in a ledger-derived query.
+    """
+    out, _, rc = sandbox.run("create", stdin=json.dumps(_new_entry(id="2026-07-valid-slug")))
+    assert rc == 0
+    out, _, rc = sandbox.run("filter", "--changed-since", "2000-01-01", "--brief")
+    assert rc == 0
+    assert "2026-07-valid-slug" in out
 
 
 def test_create_rejects_bad_schema_block(sandbox):
@@ -524,3 +828,199 @@ def test_changes_json(sandbox):
     parsed = json.loads(out)
     assert isinstance(parsed, list)
     assert parsed[-1]["op"] == "add-tags"
+
+
+def test_changes_since_naive_date(sandbox):
+    """changes --since with a bare date must not crash (regression).
+
+    Ledger timestamps are tz-aware (`...Z`); a bare `--since 2020-01-01`
+    parses naive, and comparing naive vs aware raised TypeError, making every
+    --since query crash with empty output. The fix normalizes naive values to
+    UTC.
+    """
+    sandbox.run("add-tags", "2026-04-self-study", "t1")
+    out, _, rc = sandbox.run("changes", "--since", "2020-01-01")
+    assert rc == 0
+    assert "add-tags" in out
+    assert "2026-04-self-study" in out
+
+
+def test_changes_since_json_naive_date(sandbox):
+    """The MCP path (changes --format json --since <naive>) must not crash."""
+    sandbox.run("add-tags", "2026-04-self-study", "t1")
+    out, _, rc = sandbox.run("changes", "--format", "json", "--since", "2020-01-01")
+    assert rc == 0
+    parsed = json.loads(out)
+    assert any(e["op"] == "add-tags" for e in parsed)
+
+
+def test_changes_since_tz_aware(sandbox):
+    """An explicit tz-aware --since still works."""
+    sandbox.run("add-tags", "2026-04-self-study", "t1")
+    out, _, rc = sandbox.run("changes", "--since", "2020-01-01T00:00:00Z")
+    assert rc == 0
+    assert "add-tags" in out
+
+
+def test_changes_since_future_excludes(sandbox):
+    """A future --since matches nothing but exits cleanly."""
+    sandbox.run("add-tags", "2026-04-self-study", "t1")
+    out, _, rc = sandbox.run("changes", "--since", "2099-01-01")
+    assert rc == 0
+    assert "2026-04-self-study" not in out
+
+
+def test_changes_since_combined_with_op(sandbox):
+    """--since composes with --op."""
+    sandbox.run("add-tags", "2026-04-self-study", "t1")
+    sandbox.run("delete", "2026-01-security-workshop", "--confirm")
+    out, _, rc = sandbox.run("changes", "--since", "2020-01-01", "--op", "delete")
+    assert rc == 0
+    assert "2026-01-security-workshop" in out
+    assert "add-tags" not in out
+
+
+def test_changes_since_invalid(sandbox):
+    """An unparseable --since is a clean error, not a crash."""
+    sandbox.run("add-tags", "2026-04-self-study", "t1")
+    out, _, rc = sandbox.run("changes", "--since", "not-a-date")
+    assert rc == 1
+    assert "cannot parse" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# --changed-since / --changed-until (ledger-derived) on filter / list / search
+# ---------------------------------------------------------------------------
+
+
+def test_filter_changed_since_excludes_unledgered(sandbox):
+    """A fresh sandbox has no ledger, so --changed-since matches nothing.
+
+    The fixture corpus has entries but no ledger lines (mirrors the user's
+    bulk-imported pre-ledger corpus). Entries with no recorded change must be
+    excluded whenever a --changed-since bound is set.
+    """
+    out, _, rc = sandbox.run("filter", "--changed-since", "2000-01-01", "--count")
+    assert rc == 0
+    assert out.strip() == "0"
+
+
+def test_filter_changed_since_includes_after_write(sandbox):
+    """Once an entry is written through the tool, it has a ledger record."""
+    sandbox.run("add-tags", "2026-04-self-study", "marker")
+    out, _, rc = sandbox.run("filter", "--changed-since", "2000-01-01", "--brief")
+    assert rc == 0
+    assert "2026-04-self-study" in out
+
+
+def test_filter_changed_since_future_excludes(sandbox):
+    """A future cutoff excludes a just-written entry."""
+    sandbox.run("add-tags", "2026-04-self-study", "marker")
+    out, _, rc = sandbox.run("filter", "--changed-since", "2099-01-01", "--count")
+    assert rc == 0
+    assert out.strip() == "0"
+
+
+def test_filter_changed_until_includes_and_excludes(sandbox):
+    """--changed-until keeps entries last touched at/before the bound."""
+    sandbox.run("add-tags", "2026-04-self-study", "marker")
+    out, _, rc = sandbox.run("filter", "--changed-until", "2099-01-01", "--brief")
+    assert rc == 0
+    assert "2026-04-self-study" in out
+    out, _, rc = sandbox.run("filter", "--changed-until", "2000-01-01", "--count")
+    assert rc == 0
+    assert out.strip() == "0"
+
+
+def test_filter_changed_until_bare_date_includes_same_day(sandbox):
+    """A bare-date --changed-until is inclusive of the whole day.
+
+    The write happens 'now' (e.g. 14:30Z); a date-only upper bound parses to
+    midnight, so without end-of-day normalization the same-day change is wrongly
+    dropped. Today's bare date must include it; yesterday's must exclude it.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    today = datetime.now(timezone.utc).date()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    today_str = today.isoformat()
+
+    sandbox.run("add-tags", "2026-04-self-study", "marker")
+
+    out, _, rc = sandbox.run("filter", "--changed-until", today_str, "--brief")
+    assert rc == 0
+    assert "2026-04-self-study" in out, "same-day change wrongly excluded by bare-date upper bound"
+
+    out, _, rc = sandbox.run("filter", "--changed-until", yesterday, "--count")
+    assert rc == 0
+    assert out.strip() == "0"
+
+
+def test_filter_changed_until_explicit_midnight_is_exact(sandbox):
+    """An explicit T-time upper bound is honored as-is (not end-of-day)."""
+    sandbox.run("add-tags", "2026-04-self-study", "marker")
+    # Explicit midnight today: a change made later today is after this instant.
+    from datetime import datetime, timezone
+
+    midnight = datetime.now(timezone.utc).date().isoformat() + "T00:00:00Z"
+    out, _, rc = sandbox.run("filter", "--changed-until", midnight, "--count")
+    assert rc == 0
+    assert out.strip() == "0"
+
+
+def test_filter_changed_since_with_tag_since_last_pull(sandbox):
+    """The headline use case: tag + changed-since to find what to export.
+
+    Only the entry that (a) carries the tag AND (b) was changed through the
+    tool after the cutoff should appear.
+    """
+    sandbox.run("add-tags", "2026-04-self-study", "synced-marker")
+    out, _, rc = sandbox.run(
+        "filter", "--tag", "synced-marker", "--changed-since", "2000-01-01", "--brief"
+    )
+    assert rc == 0
+    assert "2026-04-self-study" in out
+    # A different entry with the same recency but without the tag is excluded.
+    sandbox.run("add-tags", "2025-02-conference-talk", "other-marker")
+    out, _, rc = sandbox.run(
+        "filter", "--tag", "synced-marker", "--changed-since", "2000-01-01", "--count"
+    )
+    assert rc == 0
+    assert out.strip() == "1"
+
+
+def test_filter_changed_since_invalid(sandbox):
+    """An unparseable --changed-since is a clean error."""
+    out, _, rc = sandbox.run("filter", "--changed-since", "nope")
+    assert rc == 1
+    assert "cannot parse" in out.lower()
+
+
+def test_list_changed_since(sandbox):
+    """list honors --changed-since."""
+    sandbox.run("add-tags", "2026-04-self-study", "marker")
+    out, _, rc = sandbox.run("list", "--changed-since", "2000-01-01")
+    assert rc == 0
+    assert "2026-04-self-study" in out
+    out, _, rc = sandbox.run("list", "--changed-since", "2099-01-01")
+    assert rc == 0
+    assert "Total entries: 0" in out
+
+
+def test_search_changed_since(sandbox):
+    """search honors --changed-since, intersecting with the text query."""
+    sandbox.run("add-tags", "2026-04-self-study", "marker")
+    # Match-all-ish query; restrict to recently-changed.
+    out, _, rc = sandbox.run("search", "self-study", "--changed-since", "2000-01-01")
+    assert rc == 0
+    assert "2026-04-self-study" in out
+    out, _, rc = sandbox.run("search", "self-study", "--changed-since", "2099-01-01")
+    assert rc == 0
+    assert "Found 0 entries" in out
+
+
+def test_search_changed_since_invalid(sandbox):
+    """search surfaces a bad --changed-since as an error."""
+    out, _, rc = sandbox.run("search", "anything", "--changed-since", "nope")
+    assert rc == 1
+    assert "cannot parse" in out.lower()

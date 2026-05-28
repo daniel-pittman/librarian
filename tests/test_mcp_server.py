@@ -16,6 +16,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+import librarian.mcp_server as mcp_server
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SERVER_SCRIPT = _REPO_ROOT / "librarian" / "mcp_server.py"
 
@@ -69,3 +73,94 @@ def test_mcp_server_runs_as_script_file(tmp_path):
         f"stdout={proc.stdout.decode(errors='replace')!r}\n"
         f"stderr={proc.stderr.decode(errors='replace')!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Error surfacing — a failing CLI call must not return empty/truncated success
+# ---------------------------------------------------------------------------
+
+
+def test_out_surfaces_stderr_on_failure():
+    """_out returns an ERROR string built from stderr when the CLI fails."""
+    assert mcp_server._out({"ok": True, "stdout": "data", "stderr": ""}) == "data"
+    assert mcp_server._out({"ok": False, "stdout": "", "stderr": "boom"}) == "ERROR: boom"
+
+
+def test_out_does_not_double_error_prefix():
+    """When the CLI already printed `ERROR: ...` to stdout, _out keeps one prefix.
+
+    cmd_filter/search/list print their own `ERROR: ...` to stdout and exit
+    non-zero; _out falls back to stdout when stderr is empty and must not
+    produce `ERROR: ERROR: ...`.
+    """
+    result = {"ok": False, "stdout": "ERROR: cannot parse --changed-since 'nope'", "stderr": ""}
+    assert mcp_server._out(result) == "ERROR: cannot parse --changed-since 'nope'"
+    assert not mcp_server._out(result).startswith("ERROR: ERROR:")
+
+
+def test_capped_surfaces_stderr_and_truncates():
+    """_capped surfaces failures like _out and truncates long success output."""
+    assert mcp_server._capped({"ok": False, "stdout": "", "stderr": "boom"}) == "ERROR: boom"
+    big = "x" * 60_000
+    out = mcp_server._capped({"ok": True, "stdout": big, "stderr": ""}, cap=50_000)
+    assert out.endswith("[... truncated]")
+    assert len(out) < len(big)
+
+
+def test_changes_since_does_not_swallow_errors(monkeypatch):
+    """librarian_changes_since must surface a CLI failure, not return empty.
+
+    This is the regression guard for the bug where the wrapper returned only
+    stdout, so a crash in `changes --since` looked like 'no changes'.
+    """
+    monkeypatch.setattr(
+        mcp_server,
+        "_run_cli",
+        lambda args, **kw: {"ok": False, "stdout": "", "stderr": "kaboom", "exit_code": 1},
+    )
+    result = mcp_server.librarian_changes_since(since="2020-01-01")
+    assert result.startswith("ERROR:")
+    assert "kaboom" in result
+
+
+@pytest.mark.parametrize(
+    "tool,kwargs,expected_pairs",
+    [
+        (
+            "librarian_filter",
+            {"tag": "grant", "changed_since": "2026-05-01"},
+            [("--tag", "grant"), ("--changed-since", "2026-05-01")],
+        ),
+        (
+            "librarian_filter",
+            {"changed_until": "2026-05-28"},
+            [("--changed-until", "2026-05-28")],
+        ),
+        (
+            "librarian_list",
+            {"changed_since": "2026-05-01"},
+            [("--changed-since", "2026-05-01")],
+        ),
+        (
+            "librarian_search",
+            {"query": "grant", "changed_since": "2026-05-01"},
+            [("--changed-since", "2026-05-01")],
+        ),
+    ],
+)
+def test_changed_window_params_translate_to_flags(monkeypatch, tool, kwargs, expected_pairs):
+    """The MCP wrappers forward changed_since/until as the matching CLI flags."""
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        return {"ok": True, "stdout": "", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    getattr(mcp_server, tool)(**kwargs)
+    args = captured["args"]
+    # Each flag must be immediately followed by its value (order-adjacent).
+    for flag, value in expected_pairs:
+        assert flag in args, f"{flag} missing from {args}"
+        i = args.index(flag)
+        assert args[i : i + 2] == [flag, value], f"{flag} not adjacent to {value} in {args}"
