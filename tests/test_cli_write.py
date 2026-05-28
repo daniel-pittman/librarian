@@ -198,6 +198,36 @@ def test_docs_optional_does_not_suppress_other_no_docs(sandbox):
     assert "NO DOCS: 2026-08-unflagged" in out
 
 
+def test_create_docs_optional_stringy_false_is_falsey(sandbox):
+    """create coerces a JSON string "false" to real False, not truthy.
+
+    A non-empty string "false" is truthy in Python, so without coercion the
+    entry would render docs_optional: true. create now parses it the same
+    strict way update-field does.
+    """
+    out, _, rc = sandbox.run("create", stdin=json.dumps(_docless_entry(docs_optional="false")))
+    assert rc == 0
+    assert sandbox.entry("2026-08-docless")["docs_optional"] is False
+    assert _no_docs_flagged(sandbox, "2026-08-docless")
+
+
+def test_create_docs_optional_invalid_token_rejected(sandbox):
+    """create rejects a docs_optional value that isn't a recognized boolean."""
+    out, _, rc = sandbox.run("create", stdin=json.dumps(_docless_entry(docs_optional="maybe")))
+    assert rc == 1
+    assert "docs_optional" in out.lower()
+
+
+def test_update_field_docs_optional_invalid_token_rejected(sandbox):
+    """update-field rejects a bool typo instead of silently coercing to false."""
+    sandbox.run("create", stdin=json.dumps(_docless_entry()))
+    out, _, rc = sandbox.run("update-field", "2026-08-docless", "docs_optional", "ture")
+    assert rc == 1
+    assert "docs_optional" in out.lower()
+    # The entry must be unchanged (no docs_optional written).
+    assert "docs_optional" not in sandbox.entry("2026-08-docless")
+
+
 # ---------------------------------------------------------------------------
 # update-description / update-notes
 # ---------------------------------------------------------------------------

@@ -955,6 +955,30 @@ def _is_valid_id(entry_id: str) -> bool:
     return bool(_VALID_ID_RE.fullmatch(entry_id))
 
 
+_TRUE_TOKENS = frozenset({"true", "yes", "1"})
+_FALSE_TOKENS = frozenset({"false", "no", "0"})
+
+
+def _parse_bool(value: object) -> bool:
+    """Coerce a boolean-ish value to a real ``bool``, strictly.
+
+    Accepts an actual ``bool`` as-is, or a recognized string token
+    (``true/yes/1`` or ``false/no/0``, case-insensitive). Raises
+    :class:`ValueError` on anything else so a typo like ``ture`` is rejected
+    rather than silently coerced to ``False``. Used by both ``create`` and
+    ``update-field`` so the two entry points agree on the same field.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in _TRUE_TOKENS:
+            return True
+        if token in _FALSE_TOKENS:
+            return False
+    raise ValueError(f"expected a boolean (true/false), got {value!r}")
+
+
 def _scan_list_items(
     lines: list[str], parent_idx: int, end: int
 ) -> tuple[list[tuple[int, str]], int | None, int]:
@@ -1034,6 +1058,15 @@ def cmd_create(ctx: Context, args: list[str]) -> int:
     if not isinstance(data["id"], str) or not _is_valid_id(data["id"]):
         print(f"ERROR: '{data['id']}' is not a valid id (lowercase, digits, hyphens)")
         return 1
+
+    # Normalize docs_optional to a real boolean so a stringy "false" doesn't
+    # render as truthy — keeping create in agreement with update-field.
+    if "docs_optional" in data:
+        try:
+            data["docs_optional"] = _parse_bool(data["docs_optional"])
+        except ValueError as exc:
+            print(f"ERROR: docs_optional {exc}")
+            return 1
 
     _, activities = load_activities(ctx.paths.activities)
     if data["id"] in {e.get("id") for e in activities}:
@@ -1154,9 +1187,11 @@ def _render_entry(ctx: Context, data: dict, *, indent: int = 2) -> str:
     else:
         out.append(f"{field}docs: []")
 
-    # Acknowledge a deliberately artifact-free entry (suppresses NO DOCS).
-    if data.get("docs_optional"):
-        out.append(f"{field}docs_optional: true")
+    # Persist docs_optional iff the caller supplied it (true suppresses the
+    # NO DOCS warning; false is written explicitly so create and update-field
+    # agree on representation). Entries that never mention it stay clean.
+    if "docs_optional" in data:
+        out.append(f"{field}docs_optional: {'true' if data['docs_optional'] else 'false'}")
 
     out.append(f"{field}tags:")
     for tag in data.get("tags", []) or []:
@@ -1233,7 +1268,11 @@ def cmd_update_field(ctx: Context, args: list[str]) -> int:
     # docs_optional is rendered as an unquoted YAML boolean; every other
     # supported field is a quoted scalar.
     if field == "docs_optional":
-        rendered = "true" if value.strip().lower() in ("true", "yes", "1") else "false"
+        try:
+            rendered = "true" if _parse_bool(value) else "false"
+        except ValueError as exc:
+            print(f"ERROR: docs_optional {exc}")
+            return 1
     else:
         rendered = yaml_quote(value)
 
@@ -2133,29 +2172,32 @@ def cmd_env(ctx: Context, args: list[str]) -> int:
     repository.
     """
     p = ctx.paths
-    # (label, resolved-path-or-None, controlling env var or None=derived)
+    # (label, resolved-path-or-None, controlling env var, fallback-source).
+    # The fallback names where a path comes from when its own env var is unset:
+    # the XDG "default" for home, the data "home" for per-resource paths, and
+    # "derived" for artifacts (always <root>/artifacts).
     rows = [
-        ("home", p.home, "LIBRARIAN_HOME"),
-        ("activities", p.activities, "LIBRARIAN_YAML_PATH"),
-        ("files", p.files, "LIBRARIAN_FILES_PATH"),
-        ("ledger", p.ledger, "LIBRARIAN_LEDGER_PATH"),
-        ("schema", p.schema, "LIBRARIAN_SCHEMA_PATH"),
-        ("root", p.root, "LIBRARIAN_ROOT"),
-        ("artifacts", p.artifacts, None),  # derived: <root>/artifacts
-        ("memory_dir", p.memory_dir, "LIBRARIAN_MEMORY_DIR"),
+        ("home", p.home, "LIBRARIAN_HOME", "default"),
+        ("activities", p.activities, "LIBRARIAN_YAML_PATH", "home"),
+        ("files", p.files, "LIBRARIAN_FILES_PATH", "home"),
+        ("ledger", p.ledger, "LIBRARIAN_LEDGER_PATH", "home"),
+        ("schema", p.schema, "LIBRARIAN_SCHEMA_PATH", "home"),
+        ("root", p.root, "LIBRARIAN_ROOT", "home"),
+        ("artifacts", p.artifacts, None, "derived"),  # always <root>/artifacts
+        ("memory_dir", p.memory_dir, "LIBRARIAN_MEMORY_DIR", "unset"),
     ]
 
-    def source(var: str | None) -> str:
-        if var is None:
-            return "derived"
-        return var if os.environ.get(var, "").strip() else "default"
+    def source(var: str | None, fallback: str) -> str:
+        if var is not None and os.environ.get(var, "").strip():
+            return var
+        return fallback
 
     if "--json" in args:
         out: dict = {}
-        for label, path, var in rows:
+        for label, path, var, fallback in rows:
             out[label] = {
                 "path": str(path) if path is not None else None,
-                "source": source(var) if path is not None else "unset",
+                "source": source(var, fallback) if path is not None else "unset",
                 "exists": bool(path and Path(path).exists()),
             }
         out["schema_configured"] = not ctx.schema.is_empty
@@ -2163,12 +2205,12 @@ def cmd_env(ctx: Context, args: list[str]) -> int:
         return 0
 
     print("librarian environment\n")
-    for label, path, var in rows:
+    for label, path, var, fallback in rows:
         if path is None:
             print(f"  {label:12s} (unset)")
             continue
         state = "exists" if Path(path).exists() else "MISSING"
-        print(f"  {label:12s} {path}  [source={source(var)}, {state}]")
+        print(f"  {label:12s} {path}  [source={source(var, fallback)}, {state}]")
     print(f"\n  schema: {'configured' if not ctx.schema.is_empty else 'generic mode (none)'}")
     return 0
 

@@ -327,13 +327,13 @@ def test_env_reports_override_source(sandbox):
     """env attributes a path to the env var that set it.
 
     The sandbox sets LIBRARIAN_HOME and LIBRARIAN_ROOT, so those show as the
-    source; per-resource paths fall back to default.
+    source; per-resource paths with no own override derive from the home.
     """
     out, _, rc = sandbox.run("env")
     assert rc == 0
     assert "source=LIBRARIAN_HOME" in out
     assert "source=LIBRARIAN_ROOT" in out
-    assert "source=default" in out  # e.g. activities/files/ledger/schema
+    assert "source=home" in out  # e.g. activities/files/ledger/schema
 
 
 def test_env_json(sandbox):
@@ -343,6 +343,7 @@ def test_env_json(sandbox):
     parsed = json.loads(out)
     assert parsed["activities"]["path"] == str(sandbox.activities)
     assert parsed["activities"]["exists"] is True
+    assert parsed["activities"]["source"] == "home"  # derives from LIBRARIAN_HOME
     assert parsed["home"]["source"] == "LIBRARIAN_HOME"
     assert parsed["artifacts"]["source"] == "derived"
     assert parsed["schema_configured"] is True
