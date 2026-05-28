@@ -28,6 +28,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -167,6 +168,12 @@ def cmd_search(ctx: Context, args: list[str]) -> int:
     parser.add_argument("--during", help="entries active during YYYY-MM-DD:YYYY-MM-DD")
     parser.add_argument("--after", help="entries starting after this date")
     parser.add_argument("--before", help="entries starting before this date")
+    parser.add_argument(
+        "--changed-since", help="entries last changed (per ledger) at or after this timestamp"
+    )
+    parser.add_argument(
+        "--changed-until", help="entries last changed (per ledger) at or before this timestamp"
+    )
     parsed = parser.parse_args(args)
 
     during_start, during_end = _during_window(parsed.year, parsed.during)
@@ -179,6 +186,16 @@ def cmd_search(ctx: Context, args: list[str]) -> int:
         after=parsed.after,
         before=parsed.before,
     )
+    try:
+        results = _apply_changed_window(
+            results,
+            changed_since=parsed.changed_since,
+            changed_until=parsed.changed_until,
+            ledger_path=ctx.paths.ledger,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 1
     print(f"Found {len(results)} entries matching '{parsed.query}':\n")
     for entry in results:
         print_entry(entry, brief=parsed.brief)
@@ -237,6 +254,12 @@ def cmd_filter(ctx: Context, args: list[str]) -> int:
     parser.add_argument("--during", help="entries active during a range")
     parser.add_argument("--year", help="entries active during a year")
     parser.add_argument("--tag", action="append", dest="tags", help="tag (repeatable)")
+    parser.add_argument(
+        "--changed-since", help="entries last changed (per ledger) at or after this timestamp"
+    )
+    parser.add_argument(
+        "--changed-until", help="entries last changed (per ledger) at or before this timestamp"
+    )
     parser.add_argument("--brief", action="store_true", help="brief output")
     parser.add_argument("--count", action="store_true", help="print count only")
     parsed = parser.parse_args(args)
@@ -274,6 +297,16 @@ def cmd_filter(ctx: Context, args: list[str]) -> int:
         has_block=has_block,
         block_field=block_field,
     )
+    try:
+        results = _apply_changed_window(
+            results,
+            changed_since=parsed.changed_since,
+            changed_until=parsed.changed_until,
+            ledger_path=ctx.paths.ledger,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 1
 
     if parsed.count:
         print(len(results))
@@ -292,6 +325,12 @@ def cmd_list(ctx: Context, args: list[str]) -> int:
     parser.add_argument("--during", help="entries active during a range")
     parser.add_argument("--after", help="entries starting after this date")
     parser.add_argument("--before", help="entries starting before this date")
+    parser.add_argument(
+        "--changed-since", help="entries last changed (per ledger) at or after this timestamp"
+    )
+    parser.add_argument(
+        "--changed-until", help="entries last changed (per ledger) at or before this timestamp"
+    )
     parsed = parser.parse_args(args)
 
     during_start, during_end = _during_window(parsed.year, parsed.during)
@@ -304,6 +343,16 @@ def cmd_list(ctx: Context, args: list[str]) -> int:
             after=parsed.after,
             before=parsed.before,
         )
+    try:
+        activities = _apply_changed_window(
+            activities,
+            changed_since=parsed.changed_since,
+            changed_until=parsed.changed_until,
+            ledger_path=ctx.paths.ledger,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 1
     print(f"Total entries: {len(activities)}\n")
     brief = not parsed.full
     if brief:
@@ -703,10 +752,102 @@ def cmd_contact(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+def _parse_iso_utc(value: str) -> datetime | None:
+    """Parse an ISO-8601 timestamp into a timezone-aware UTC datetime.
+
+    Ledger timestamps are always written UTC-aware (``...Z``), but a
+    ``--since`` value typed by a user is commonly a bare date or naive
+    datetime (``2026-05-01``). ``datetime.fromisoformat`` returns a naive
+    object for those, and comparing naive against aware raises TypeError —
+    the bug that made every ``changes --since`` query crash. Normalizing
+    here (assume UTC when no tzinfo is present) keeps every comparison
+    aware-vs-aware. Returns ``None`` if the value cannot be parsed.
+    """
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _ledger_change_index(ledger_path: Path) -> dict[str, tuple[datetime, datetime]]:
+    """Map each entry id to its (first_change, last_change) ledger timestamps.
+
+    Reads the append-only ledger once and records, per entry id, the earliest
+    timestamp (effectively "created") and the latest ("last touched"). All
+    operations count toward the last-touched time. Entries with no ledger line
+    are simply absent from the map — callers treat that as "no recorded
+    change", which is correct for the changes-since-last-pull use case (the
+    bulk-imported pre-ledger corpus has no lines and should not match a
+    ``--changed-since``).
+    """
+    index: dict[str, tuple[datetime, datetime]] = {}
+    if not ledger_path.exists():
+        return index
+    for line in ledger_path.read_text(encoding="utf-8").splitlines():
+        parts = line.split(maxsplit=3)
+        if len(parts) < 3:
+            continue
+        ts = _parse_iso_utc(parts[0])
+        if ts is None:
+            continue
+        entry_id = parts[2]
+        existing = index.get(entry_id)
+        if existing is None:
+            index[entry_id] = (ts, ts)
+        else:
+            first, last = existing
+            index[entry_id] = (min(first, ts), max(last, ts))
+    return index
+
+
+def _apply_changed_window(
+    activities: list[dict],
+    *,
+    changed_since: str | None,
+    changed_until: str | None,
+    ledger_path: Path,
+) -> list[dict]:
+    """Restrict entries to those whose last ledger change falls in a window.
+
+    ``changed_since`` / ``changed_until`` are ISO timestamps (naive values are
+    treated as UTC). Filtering is on each entry's *last* recorded change.
+    Entries with no ledger record are excluded whenever either bound is set.
+    Returns the list unchanged when neither bound is provided. Raises
+    :class:`ValueError` if a bound cannot be parsed.
+    """
+    if not changed_since and not changed_until:
+        return activities
+    since_dt = None
+    if changed_since:
+        since_dt = _parse_iso_utc(changed_since)
+        if since_dt is None:
+            raise ValueError(f"cannot parse --changed-since '{changed_since}'")
+    until_dt = None
+    if changed_until:
+        until_dt = _parse_iso_utc(changed_until)
+        if until_dt is None:
+            raise ValueError(f"cannot parse --changed-until '{changed_until}'")
+
+    index = _ledger_change_index(ledger_path)
+    kept = []
+    for entry in activities:
+        record = index.get(entry.get("id"))
+        if record is None:
+            continue  # no ledger history → not a recorded change
+        last_change = record[1]
+        if since_dt and last_change < since_dt:
+            continue
+        if until_dt and last_change > until_dt:
+            continue
+        kept.append(entry)
+    return kept
+
+
 def cmd_changes(ctx: Context, args: list[str]) -> int:
     """Show change-ledger entries. ``changes [--since ...] [--op ...] ...``"""
-    from datetime import datetime
-
     parser = argparse.ArgumentParser(prog="librarian changes")
     parser.add_argument("--since", help="ISO timestamp; entries at or after it")
     parser.add_argument("--limit", type=int, default=100)
@@ -723,9 +864,8 @@ def cmd_changes(ctx: Context, args: list[str]) -> int:
 
     since_dt = None
     if parsed.since:
-        try:
-            since_dt = datetime.fromisoformat(parsed.since.replace("Z", "+00:00"))
-        except ValueError:
+        since_dt = _parse_iso_utc(parsed.since)
+        if since_dt is None:
             print(f"ERROR: cannot parse --since '{parsed.since}'")
             return 1
 
@@ -738,9 +878,8 @@ def cmd_changes(ctx: Context, args: list[str]) -> int:
             continue
         ts_str, op, entry_id = parts[0], parts[1], parts[2]
         meta_str = parts[3] if len(parts) > 3 else ""
-        try:
-            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-        except ValueError:
+        ts = _parse_iso_utc(ts_str)
+        if ts is None:
             continue
         if since_dt and ts < since_dt:
             continue

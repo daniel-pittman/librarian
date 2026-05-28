@@ -16,6 +16,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+import librarian.mcp_server as mcp_server
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SERVER_SCRIPT = _REPO_ROOT / "librarian" / "mcp_server.py"
 
@@ -69,3 +73,80 @@ def test_mcp_server_runs_as_script_file(tmp_path):
         f"stdout={proc.stdout.decode(errors='replace')!r}\n"
         f"stderr={proc.stderr.decode(errors='replace')!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Error surfacing — a failing CLI call must not return empty/truncated success
+# ---------------------------------------------------------------------------
+
+
+def test_out_surfaces_stderr_on_failure():
+    """_out returns an ERROR string built from stderr when the CLI fails."""
+    assert mcp_server._out({"ok": True, "stdout": "data", "stderr": ""}) == "data"
+    assert mcp_server._out({"ok": False, "stdout": "", "stderr": "boom"}) == "ERROR: boom"
+
+
+def test_capped_surfaces_stderr_and_truncates():
+    """_capped surfaces failures like _out and truncates long success output."""
+    assert mcp_server._capped({"ok": False, "stdout": "", "stderr": "boom"}) == "ERROR: boom"
+    big = "x" * 60_000
+    out = mcp_server._capped({"ok": True, "stdout": big, "stderr": ""}, cap=50_000)
+    assert out.endswith("[... truncated]")
+    assert len(out) < len(big)
+
+
+def test_changes_since_does_not_swallow_errors(monkeypatch):
+    """librarian_changes_since must surface a CLI failure, not return empty.
+
+    This is the regression guard for the bug where the wrapper returned only
+    stdout, so a crash in `changes --since` looked like 'no changes'.
+    """
+    monkeypatch.setattr(
+        mcp_server,
+        "_run_cli",
+        lambda args, **kw: {"ok": False, "stdout": "", "stderr": "kaboom", "exit_code": 1},
+    )
+    result = mcp_server.librarian_changes_since(since="2020-01-01")
+    assert result.startswith("ERROR:")
+    assert "kaboom" in result
+
+
+@pytest.mark.parametrize(
+    "tool,kwargs,expected_flags",
+    [
+        (
+            "librarian_filter",
+            {"tag": "grant", "changed_since": "2026-05-01"},
+            ["--tag", "grant", "--changed-since", "2026-05-01"],
+        ),
+        (
+            "librarian_filter",
+            {"changed_until": "2026-05-28"},
+            ["--changed-until", "2026-05-28"],
+        ),
+        (
+            "librarian_list",
+            {"changed_since": "2026-05-01"},
+            ["--changed-since", "2026-05-01"],
+        ),
+        (
+            "librarian_search",
+            {"query": "grant", "changed_since": "2026-05-01"},
+            ["--changed-since", "2026-05-01"],
+        ),
+    ],
+)
+def test_changed_window_params_translate_to_flags(monkeypatch, tool, kwargs, expected_flags):
+    """The MCP wrappers forward changed_since/until as the matching CLI flags."""
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        return {"ok": True, "stdout": "", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    getattr(mcp_server, tool)(**kwargs)
+    args = captured["args"]
+    # Every expected flag/value appears in order-adjacent pairs.
+    for flag in expected_flags:
+        assert flag in args, f"{flag} missing from {args}"

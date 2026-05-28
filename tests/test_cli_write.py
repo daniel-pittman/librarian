@@ -782,3 +782,163 @@ def test_changes_json(sandbox):
     parsed = json.loads(out)
     assert isinstance(parsed, list)
     assert parsed[-1]["op"] == "add-tags"
+
+
+def test_changes_since_naive_date(sandbox):
+    """changes --since with a bare date must not crash (regression).
+
+    Ledger timestamps are tz-aware (`...Z`); a bare `--since 2020-01-01`
+    parses naive, and comparing naive vs aware raised TypeError, making every
+    --since query crash with empty output. The fix normalizes naive values to
+    UTC.
+    """
+    sandbox.run("add-tags", "2026-04-self-study", "t1")
+    out, _, rc = sandbox.run("changes", "--since", "2020-01-01")
+    assert rc == 0
+    assert "add-tags" in out
+    assert "2026-04-self-study" in out
+
+
+def test_changes_since_json_naive_date(sandbox):
+    """The MCP path (changes --format json --since <naive>) must not crash."""
+    sandbox.run("add-tags", "2026-04-self-study", "t1")
+    out, _, rc = sandbox.run("changes", "--format", "json", "--since", "2020-01-01")
+    assert rc == 0
+    parsed = json.loads(out)
+    assert any(e["op"] == "add-tags" for e in parsed)
+
+
+def test_changes_since_tz_aware(sandbox):
+    """An explicit tz-aware --since still works."""
+    sandbox.run("add-tags", "2026-04-self-study", "t1")
+    out, _, rc = sandbox.run("changes", "--since", "2020-01-01T00:00:00Z")
+    assert rc == 0
+    assert "add-tags" in out
+
+
+def test_changes_since_future_excludes(sandbox):
+    """A future --since matches nothing but exits cleanly."""
+    sandbox.run("add-tags", "2026-04-self-study", "t1")
+    out, _, rc = sandbox.run("changes", "--since", "2099-01-01")
+    assert rc == 0
+    assert "2026-04-self-study" not in out
+
+
+def test_changes_since_combined_with_op(sandbox):
+    """--since composes with --op."""
+    sandbox.run("add-tags", "2026-04-self-study", "t1")
+    sandbox.run("delete", "2026-01-security-workshop", "--confirm")
+    out, _, rc = sandbox.run("changes", "--since", "2020-01-01", "--op", "delete")
+    assert rc == 0
+    assert "2026-01-security-workshop" in out
+    assert "add-tags" not in out
+
+
+def test_changes_since_invalid(sandbox):
+    """An unparseable --since is a clean error, not a crash."""
+    sandbox.run("add-tags", "2026-04-self-study", "t1")
+    out, _, rc = sandbox.run("changes", "--since", "not-a-date")
+    assert rc == 1
+    assert "cannot parse" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# --changed-since / --changed-until (ledger-derived) on filter / list / search
+# ---------------------------------------------------------------------------
+
+
+def test_filter_changed_since_excludes_unledgered(sandbox):
+    """A fresh sandbox has no ledger, so --changed-since matches nothing.
+
+    The fixture corpus has entries but no ledger lines (mirrors the user's
+    bulk-imported pre-ledger corpus). Entries with no recorded change must be
+    excluded whenever a --changed-since bound is set.
+    """
+    out, _, rc = sandbox.run("filter", "--changed-since", "2000-01-01", "--count")
+    assert rc == 0
+    assert out.strip() == "0"
+
+
+def test_filter_changed_since_includes_after_write(sandbox):
+    """Once an entry is written through the tool, it has a ledger record."""
+    sandbox.run("add-tags", "2026-04-self-study", "marker")
+    out, _, rc = sandbox.run("filter", "--changed-since", "2000-01-01", "--brief")
+    assert rc == 0
+    assert "2026-04-self-study" in out
+
+
+def test_filter_changed_since_future_excludes(sandbox):
+    """A future cutoff excludes a just-written entry."""
+    sandbox.run("add-tags", "2026-04-self-study", "marker")
+    out, _, rc = sandbox.run("filter", "--changed-since", "2099-01-01", "--count")
+    assert rc == 0
+    assert out.strip() == "0"
+
+
+def test_filter_changed_until_includes_and_excludes(sandbox):
+    """--changed-until keeps entries last touched at/before the bound."""
+    sandbox.run("add-tags", "2026-04-self-study", "marker")
+    out, _, rc = sandbox.run("filter", "--changed-until", "2099-01-01", "--brief")
+    assert rc == 0
+    assert "2026-04-self-study" in out
+    out, _, rc = sandbox.run("filter", "--changed-until", "2000-01-01", "--count")
+    assert rc == 0
+    assert out.strip() == "0"
+
+
+def test_filter_changed_since_with_tag_since_last_pull(sandbox):
+    """The headline use case: tag + changed-since to find what to export.
+
+    Only the entry that (a) carries the tag AND (b) was changed through the
+    tool after the cutoff should appear.
+    """
+    sandbox.run("add-tags", "2026-04-self-study", "synced-marker")
+    out, _, rc = sandbox.run(
+        "filter", "--tag", "synced-marker", "--changed-since", "2000-01-01", "--brief"
+    )
+    assert rc == 0
+    assert "2026-04-self-study" in out
+    # A different entry with the same recency but without the tag is excluded.
+    sandbox.run("add-tags", "2025-02-conference-talk", "other-marker")
+    out, _, rc = sandbox.run(
+        "filter", "--tag", "synced-marker", "--changed-since", "2000-01-01", "--count"
+    )
+    assert rc == 0
+    assert out.strip() == "1"
+
+
+def test_filter_changed_since_invalid(sandbox):
+    """An unparseable --changed-since is a clean error."""
+    out, _, rc = sandbox.run("filter", "--changed-since", "nope")
+    assert rc == 1
+    assert "cannot parse" in out.lower()
+
+
+def test_list_changed_since(sandbox):
+    """list honors --changed-since."""
+    sandbox.run("add-tags", "2026-04-self-study", "marker")
+    out, _, rc = sandbox.run("list", "--changed-since", "2000-01-01")
+    assert rc == 0
+    assert "2026-04-self-study" in out
+    out, _, rc = sandbox.run("list", "--changed-since", "2099-01-01")
+    assert rc == 0
+    assert "Total entries: 0" in out
+
+
+def test_search_changed_since(sandbox):
+    """search honors --changed-since, intersecting with the text query."""
+    sandbox.run("add-tags", "2026-04-self-study", "marker")
+    # Match-all-ish query; restrict to recently-changed.
+    out, _, rc = sandbox.run("search", "self-study", "--changed-since", "2000-01-01")
+    assert rc == 0
+    assert "2026-04-self-study" in out
+    out, _, rc = sandbox.run("search", "self-study", "--changed-since", "2099-01-01")
+    assert rc == 0
+    assert "Found 0 entries" in out
+
+
+def test_search_changed_since_invalid(sandbox):
+    """search surfaces a bad --changed-since as an error."""
+    out, _, rc = sandbox.run("search", "anything", "--changed-since", "nope")
+    assert rc == 1
+    assert "cannot parse" in out.lower()
