@@ -495,7 +495,9 @@ def cmd_validate(ctx: Context, args: list[str]) -> int:
         for field in ("date", "title", "description"):
             if not entry.get(field):
                 issues.append(f"MISSING {field.upper()}: {eid}")
-        if not entry.get("docs"):
+        # `docs_optional: true` acknowledges an entry that legitimately has no
+        # artifact, suppressing the NO DOCS warning so genuine gaps stand out.
+        if not entry.get("docs") and not entry.get("docs_optional"):
             issues.append(f"NO DOCS: {eid}")
 
         # Schema-block validation — every block the entry carries that the
@@ -1135,7 +1137,7 @@ def _render_entry(ctx: Context, data: dict, *, indent: int = 2) -> str:
     # Any block the schema does not know about is still written (generic mode
     # / mixed schemas) using a generic renderer.
     known_blocks = {b.name for b in ctx.schema.blocks}
-    core_keys = {"id", "date", "end_date", "title", "description", "tags", "docs"}
+    core_keys = {"id", "date", "end_date", "title", "description", "tags", "docs", "docs_optional"}
     for key, value in data.items():
         if key in core_keys or key in known_blocks:
             continue
@@ -1151,6 +1153,10 @@ def _render_entry(ctx: Context, data: dict, *, indent: int = 2) -> str:
             out.append(f"{sub}- {yaml_quote(str(doc))}")
     else:
         out.append(f"{field}docs: []")
+
+    # Acknowledge a deliberately artifact-free entry (suppresses NO DOCS).
+    if data.get("docs_optional"):
+        out.append(f"{field}docs_optional: true")
 
     out.append(f"{field}tags:")
     for tag in data.get("tags", []) or []:
@@ -1209,18 +1215,27 @@ def cmd_delete(ctx: Context, args: list[str]) -> int:
 def cmd_update_field(ctx: Context, args: list[str]) -> int:
     """Update a top-level field. ``update-field <id> <field> <value>``
 
-    Supported fields: ``title``, ``date``, ``end_date``.
+    Supported fields: ``title``, ``date``, ``end_date``, ``docs_optional``.
+    ``docs_optional`` is a boolean (``true``/``false``) that suppresses the
+    NO DOCS validation warning for an entry that legitimately has no artifact.
     """
     label = _resolve_label(args, required=True)
     if label is None:
         return 1
     if len(args) < 3:
-        print("Usage: librarian update-field <id> <title|date|end_date> <value>")
+        print("Usage: librarian update-field <id> <title|date|end_date|docs_optional> <value>")
         return 1
     entry_id, field, value = args[0], args[1], " ".join(args[2:])
-    if field not in ("title", "date", "end_date"):
-        print(f"ERROR: field '{field}' not supported (use title, date, end_date)")
+    if field not in ("title", "date", "end_date", "docs_optional"):
+        print(f"ERROR: field '{field}' not supported (use title, date, end_date, docs_optional)")
         return 1
+
+    # docs_optional is rendered as an unquoted YAML boolean; every other
+    # supported field is a quoted scalar.
+    if field == "docs_optional":
+        rendered = "true" if value.strip().lower() in ("true", "yes", "1") else "false"
+    else:
+        rendered = yaml_quote(value)
 
     lines = read_lines(ctx.paths.activities)
     start, end = find_entry_line_range(lines, entry_id)
@@ -1242,23 +1257,23 @@ def cmd_update_field(ctx: Context, args: list[str]) -> int:
                 cont += 1
             else:
                 break
-        lines[idx:cont] = [f"{indent}{field}: {yaml_quote(value)}\n"]
+        lines[idx:cont] = [f"{indent}{field}: {rendered}\n"]
         write_lines(ctx.paths.activities, lines)
         append_ledger(ctx.paths.ledger, "update-field", entry_id, label, f"{field}={value[:80]}")
-        print(f"Updated {field} on '{entry_id}' to: {value}")
+        print(f"Updated {field} on '{entry_id}' to: {rendered}")
         return 0
 
-    # end_date can be added after the date line if it does not yet exist.
-    if field == "end_date":
+    # end_date / docs_optional can be added after the date line if absent.
+    if field in ("end_date", "docs_optional"):
         date_idx = _find_field_line(lines, start, end, "date")
         if date_idx is not None:
             indent = " " * line_indent(lines[date_idx])
-            lines.insert(date_idx + 1, f"{indent}end_date: {yaml_quote(value)}\n")
+            lines.insert(date_idx + 1, f"{indent}{field}: {rendered}\n")
             write_lines(ctx.paths.activities, lines)
             append_ledger(
                 ctx.paths.ledger, "update-field", entry_id, label, f"{field}={value[:80]} (added)"
             )
-            print(f"Added {field} on '{entry_id}' to: {value}")
+            print(f"Added {field} on '{entry_id}' to: {rendered}")
             return 0
     print(f"ERROR: field '{field}' not found in entry '{entry_id}'")
     return 1
@@ -2072,6 +2087,7 @@ def cmd_schema(ctx: Context, args: list[str]) -> int:
                                     "type": f.type,
                                     "depends_on": f.depends_on,
                                     "required": f.required,
+                                    "values": f.values,
                                 }
                                 for f in b.fields
                             ],
@@ -2093,7 +2109,67 @@ def cmd_schema(ctx: Context, args: list[str]) -> int:
             extra = f" depends_on={field.depends_on}" if field.depends_on else ""
             req = " [required]" if field.required else ""
             print(f"    {field.name:18s} {field.type}{extra}{req}")
+            # Enumerate enum values so valid choices are discoverable without
+            # reading schema.yaml. Dependent enums print their per-parent map.
+            if field.type == "enum" and field.values is not None:
+                if field.is_dependent_enum and isinstance(field.values, dict):
+                    print(f"        values (by {field.depends_on}):")
+                    for parent, children in field.values.items():
+                        print(f"          {parent}: {', '.join(map(str, children))}")
+                elif isinstance(field.values, list):
+                    print(f"        values: {', '.join(map(str, field.values))}")
         print()
+    return 0
+
+
+def cmd_env(ctx: Context, args: list[str]) -> int:
+    """Show the resolved data-home paths and their sources. ``env [--json]``
+
+    Prints where each librarian resource resolves to, which ``LIBRARIAN_*``
+    variable (if any) overrode it, and whether it currently exists on disk —
+    so an agent or operator can discover the active configuration (the "truth
+    sources") without reading the environment or config files directly. All
+    paths are local to this machine; never paste this output into a public
+    repository.
+    """
+    p = ctx.paths
+    # (label, resolved-path-or-None, controlling env var or None=derived)
+    rows = [
+        ("home", p.home, "LIBRARIAN_HOME"),
+        ("activities", p.activities, "LIBRARIAN_YAML_PATH"),
+        ("files", p.files, "LIBRARIAN_FILES_PATH"),
+        ("ledger", p.ledger, "LIBRARIAN_LEDGER_PATH"),
+        ("schema", p.schema, "LIBRARIAN_SCHEMA_PATH"),
+        ("root", p.root, "LIBRARIAN_ROOT"),
+        ("artifacts", p.artifacts, None),  # derived: <root>/artifacts
+        ("memory_dir", p.memory_dir, "LIBRARIAN_MEMORY_DIR"),
+    ]
+
+    def source(var: str | None) -> str:
+        if var is None:
+            return "derived"
+        return var if os.environ.get(var, "").strip() else "default"
+
+    if "--json" in args:
+        out: dict = {}
+        for label, path, var in rows:
+            out[label] = {
+                "path": str(path) if path is not None else None,
+                "source": source(var) if path is not None else "unset",
+                "exists": bool(path and Path(path).exists()),
+            }
+        out["schema_configured"] = not ctx.schema.is_empty
+        print(json.dumps(out, indent=2))
+        return 0
+
+    print("librarian environment\n")
+    for label, path, var in rows:
+        if path is None:
+            print(f"  {label:12s} (unset)")
+            continue
+        state = "exists" if Path(path).exists() else "MISSING"
+        print(f"  {label:12s} {path}  [source={source(var)}, {state}]")
+    print(f"\n  schema: {'configured' if not ctx.schema.is_empty else 'generic mode (none)'}")
     return 0
 
 
@@ -2117,6 +2193,7 @@ COMMANDS = {
     "contact": cmd_contact,
     "changes": cmd_changes,
     "schema": cmd_schema,
+    "env": cmd_env,
     # write
     "create": cmd_create,
     "delete": cmd_delete,
