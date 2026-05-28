@@ -201,7 +201,22 @@ def _validate_label(label: str) -> str:
 
 def _out(result: dict) -> str:
     """Return stdout, or an ERROR string built from stderr/stdout on failure."""
-    return result["stdout"] if result["ok"] else f"ERROR: {result['stderr'] or result['stdout']}"
+    if result["ok"]:
+        return result["stdout"]
+    msg = (result["stderr"] or result["stdout"]).strip()
+    # The CLI prints its own `ERROR: ...` to stdout on failure; don't double
+    # the prefix when we fall back to stdout.
+    return msg if msg.startswith("ERROR:") else f"ERROR: {msg}"
+
+
+def _capped(result: dict, cap: int = 50_000) -> str:
+    """Like :func:`_out`, but truncate very long successful output.
+
+    Used by the potentially large read tools (search / list / project) so a
+    CLI failure still surfaces its stderr instead of returning empty output.
+    """
+    out = _out(result)
+    return out if len(out) <= cap else out[:cap] + "\n\n[... truncated]"
 
 
 # =============================================================================
@@ -210,10 +225,21 @@ def _out(result: dict) -> str:
 
 
 @mcp.tool()
-def librarian_search(query: str) -> str:
-    """Full-text search across all entries. Use first when asked "is X tracked?"."""
-    out = _run_cli(["search", query])["stdout"]
-    return out if len(out) <= 50_000 else out[:50_000] + "\n\n[... truncated]"
+def librarian_search(
+    query: str, changed_since: str | None = None, changed_until: str | None = None
+) -> str:
+    """Full-text search across all entries. Use first when asked "is X tracked?".
+
+    `changed_since` / `changed_until` restrict results to entries whose last
+    ledger-recorded change falls in that window (ISO timestamp; naive = UTC).
+    Entries with no ledger history are excluded when either bound is set.
+    """
+    args = ["search", query]
+    if changed_since:
+        args += ["--changed-since", changed_since]
+    if changed_until:
+        args += ["--changed-until", changed_until]
+    return _capped(_run_cli(args))
 
 
 @mcp.tool()
@@ -231,11 +257,19 @@ def librarian_filter(
     year: str | None = None,
     tag: str | None = None,
     has_block: str | None = None,
+    changed_since: str | None = None,
+    changed_until: str | None = None,
     brief: bool = False,
 ) -> str:
     """Filter entries by schema block field, date range, tag, or block presence.
 
     `block_field` is `BLOCK.FIELD=VALUE` (e.g. `ptr.category=scholarly`).
+    `changed_since` / `changed_until` restrict results to entries whose last
+    ledger-recorded change falls in that window (ISO timestamp; naive = UTC).
+    Combine with `tag` to find what changed since you last pulled — useful
+    before exporting a slice into an external system (e.g. tag="grant",
+    changed_since="2026-05-01"). Entries with no ledger history are excluded
+    when either bound is set.
     """
     args = ["filter"]
     if category:
@@ -253,54 +287,67 @@ def librarian_filter(
         args += ["--tag", tag]
     if has_block:
         args += ["--has-block", has_block]
+    if changed_since:
+        args += ["--changed-since", changed_since]
+    if changed_until:
+        args += ["--changed-until", changed_until]
     if brief:
         args.append("--brief")
-    return _run_cli(args)["stdout"]
+    return _out(_run_cli(args))
 
 
 @mcp.tool()
 def librarian_stats() -> str:
     """Summary statistics, grouped by the active schema's blocks."""
-    return _run_cli(["stats"])["stdout"]
+    return _out(_run_cli(["stats"]))
 
 
 @mcp.tool()
 def librarian_tags() -> str:
     """List every tag in use, with frequency counts."""
-    return _run_cli(["tags"])["stdout"]
+    return _out(_run_cli(["tags"]))
 
 
 @mcp.tool()
 def librarian_validate() -> str:
     """Validate the database for parse, schema, and inventory-integrity issues."""
-    return _run_cli(["validate"])["stdout"]
+    return _out(_run_cli(["validate"]))
 
 
 @mcp.tool()
 def librarian_schema() -> str:
     """Describe the active schema — its blocks, fields, types, and enums."""
-    return _run_cli(["schema"])["stdout"]
+    return _out(_run_cli(["schema"]))
 
 
 @mcp.tool()
-def librarian_list(brief: bool = True) -> str:
-    """List all entries in date order."""
+def librarian_list(
+    brief: bool = True, changed_since: str | None = None, changed_until: str | None = None
+) -> str:
+    """List all entries in date order.
+
+    `changed_since` / `changed_until` restrict results to entries whose last
+    ledger-recorded change falls in that window (ISO timestamp; naive = UTC).
+    Entries with no ledger history are excluded when either bound is set.
+    """
     args = ["list"] if brief else ["list", "--full"]
-    out = _run_cli(args)["stdout"]
-    return out if len(out) <= 50_000 else out[:50_000] + "\n\n[... truncated]"
+    if changed_since:
+        args += ["--changed-since", changed_since]
+    if changed_until:
+        args += ["--changed-until", changed_until]
+    return _capped(_run_cli(args))
 
 
 @mcp.tool()
 def librarian_similar(text: str) -> str:
     """Fuzzy-match `text` against existing entries. USE THIS BEFORE create."""
-    return _run_cli(["similar", text])["stdout"]
+    return _out(_run_cli(["similar", text]))
 
 
 @mcp.tool()
 def librarian_project(project_name: str) -> str:
     """Return all entries tagged or keyword-matched for a project."""
-    out = _run_cli(["project", project_name])["stdout"]
-    return out if len(out) <= 50_000 else out[:50_000] + "\n\n[... truncated]"
+    return _capped(_run_cli(["project", project_name]))
 
 
 @mcp.tool()
@@ -339,7 +386,10 @@ def librarian_changes_since(
         args += ["--op", op]
     if entry_id:
         args += ["--id", entry_id]
-    return _run_cli(args)["stdout"]
+    # Route through _out so a CLI failure surfaces its stderr instead of
+    # returning empty stdout — a silent-empty result previously masked a
+    # crash in `changes --since` and made the ledger look empty.
+    return _out(_run_cli(args))
 
 
 # =============================================================================
@@ -513,7 +563,7 @@ def librarian_file_list(category: str = "", orphans: bool = False) -> str:
         args += ["--category", category]
     if orphans:
         args.append("--orphans")
-    return _run_cli(args)["stdout"]
+    return _out(_run_cli(args))
 
 
 @mcp.tool()
