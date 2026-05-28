@@ -276,8 +276,89 @@ def test_schema_json(sandbox):
     assert "ptr" in parsed["blocks"]
 
 
+def test_schema_lists_plain_enum_values(sandbox):
+    """schema enumerates a plain enum's allowed values inline."""
+    out, _, rc = sandbox.run("schema")
+    assert rc == 0
+    # The ptr.category enum values must be discoverable without reading YAML.
+    assert "values:" in out
+    assert "teaching" in out
+    assert "scholarly" in out
+    assert "service" in out
+
+
+def test_schema_lists_dependent_enum_map(sandbox):
+    """schema prints the dependent enum (category -> subcategory) map."""
+    out, _, rc = sandbox.run("schema")
+    assert rc == 0
+    assert "values (by category):" in out
+    # A representative subcategory from the fixture schema.
+    assert "cat1-peer-reviewed" in out
+
+
+def test_schema_json_includes_enum_values(sandbox):
+    """schema --json carries enum values: a list for plain, a dict for dependent."""
+    out, _, rc = sandbox.run("schema", "--json")
+    assert rc == 0
+    fields = {f["name"]: f for f in json.loads(out)["blocks"]["ptr"]["fields"]}
+    assert isinstance(fields["category"]["values"], list)
+    assert "teaching" in fields["category"]["values"]
+    assert isinstance(fields["subcategory"]["values"], dict)
+    assert "teaching" in fields["subcategory"]["values"]
+
+
+# ---------------------------------------------------------------------------
+# env
+# ---------------------------------------------------------------------------
+
+
+def test_env_shows_resolved_paths(sandbox):
+    """env prints each resolved resource path with a source and existence tag."""
+    out, _, rc = sandbox.run("env")
+    assert rc == 0
+    for label in ("home", "activities", "files", "ledger", "schema", "root"):
+        assert label in out
+    assert str(sandbox.activities) in out
+    # activities.yaml was copied into the sandbox, so it exists.
+    assert "exists" in out
+
+
+def test_env_reports_override_source(sandbox):
+    """env attributes a path to the env var that set it.
+
+    The sandbox sets LIBRARIAN_HOME and LIBRARIAN_ROOT, so those show as the
+    source; per-resource paths with no own override derive from the home.
+    """
+    out, _, rc = sandbox.run("env")
+    assert rc == 0
+    assert "source=LIBRARIAN_HOME" in out
+    assert "source=LIBRARIAN_ROOT" in out
+    assert "source=home" in out  # e.g. activities/files/ledger/schema
+
+
+def test_env_json(sandbox):
+    """env --json is parseable and reports path/source/exists per resource."""
+    out, _, rc = sandbox.run("env", "--json")
+    assert rc == 0
+    parsed = json.loads(out)
+    assert parsed["activities"]["path"] == str(sandbox.activities)
+    assert parsed["activities"]["exists"] is True
+    assert parsed["activities"]["source"] == "home"  # derives from LIBRARIAN_HOME
+    assert parsed["home"]["source"] == "LIBRARIAN_HOME"
+    assert parsed["artifacts"]["source"] == "derived"
+    assert parsed["schema_configured"] is True
+
+
+def test_env_memory_dir_unset(sandbox):
+    """With no LIBRARIAN_MEMORY_DIR, env reports memory_dir as unset."""
+    out, _, rc = sandbox.run("env", extra_env={"LIBRARIAN_MEMORY_DIR": ""})
+    assert rc == 0
+    assert "memory_dir" in out
+    assert "(unset)" in out
+
+
 def test_version(sandbox):
     """The --version flag prints the version string."""
     out, _, rc = sandbox.run("--version")
     assert rc == 0
-    assert out.strip() == "1.2.0"
+    assert out.strip() == "1.3.0"

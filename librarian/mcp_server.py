@@ -316,8 +316,25 @@ def librarian_validate() -> str:
 
 @mcp.tool()
 def librarian_schema() -> str:
-    """Describe the active schema — its blocks, fields, types, and enums."""
+    """Describe the active schema — its blocks, fields, types, and enum values.
+
+    Output enumerates each enum field's allowed values (including dependent
+    enums like category -> subcategory), so valid choices are discoverable
+    without reading schema.yaml.
+    """
     return _out(_run_cli(["schema"]))
+
+
+@mcp.tool()
+def librarian_env() -> str:
+    """Show the resolved data-home paths and their sources (the 'truth sources').
+
+    Reports where each librarian resource (activities, files, ledger, schema,
+    root, ...) resolves to, which LIBRARIAN_* variable set it, and whether it
+    exists — so you can discover the active setup without inspecting the
+    environment. Paths are local to this machine.
+    """
+    return _out(_run_cli(["env"]))
 
 
 @mcp.tool()
@@ -416,7 +433,11 @@ def librarian_create(entry_json: str, session_label: str) -> str:
 
 @mcp.tool()
 def librarian_update_field(entry_id: str, field: str, value: str, session_label: str) -> str:
-    """Update a top-level field: title, date, or end_date."""
+    """Update a top-level field: title, date, end_date, or docs_optional.
+
+    docs_optional is a boolean ("true"/"false") that suppresses the NO DOCS
+    validation warning for an entry that legitimately has no artifact.
+    """
     label = _validate_label(session_label)
     return _out(
         _run_cli(

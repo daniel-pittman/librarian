@@ -81,7 +81,15 @@ by a **pluggable schema** you choose. It ships as:
 - **Format-preserving writes** — edits are surgical, line-level splices; your
   hand-formatting and paragraph breaks survive every write.
 - **Schema validation** — `validate` flags bad enum values, missing required
-  fields, duplicate ids, dangling cross-references, and inventory problems.
+  fields, duplicate ids, dangling cross-references, and inventory problems. An
+  entry that legitimately has no artifact can set `docs_optional: true`
+  (`update-field <id> docs_optional true`) to suppress its NO DOCS warning so
+  genuine gaps stand out.
+- **Discoverability** — `env` prints the resolved data-home paths and which
+  `LIBRARIAN_*` variable set each (the "truth sources" for the active setup);
+  `schema` enumerates every enum's allowed values, including dependent maps
+  like category → subcategory, so valid choices are discoverable without
+  reading `schema.yaml`.
 - **Change ledger** — every write is appended to an audit log; poll "what
   changed since I last looked?" with `changes`. `search`, `filter`, and `list`
   also accept `--changed-since` / `--changed-until` to intersect a query with
@@ -362,7 +370,7 @@ default.
 ## Command reference
 
 **Read:** `search`, `get`, `filter`, `list`, `stats`, `tags`, `tag-audit`,
-`validate`, `export`, `project`, `similar`, `contact`, `changes`, `schema`
+`validate`, `export`, `project`, `similar`, `contact`, `changes`, `schema`, `env`
 
 **Write:** `create`, `update-field`, `update-description`, `update-notes`,
 `update-nested-field`, `add-tags`, `remove-tags`, `add-docs`, `remove-docs`,

@@ -86,6 +86,20 @@ def test_out_surfaces_stderr_on_failure():
     assert mcp_server._out({"ok": False, "stdout": "", "stderr": "boom"}) == "ERROR: boom"
 
 
+def test_env_tool_translates_to_cli(monkeypatch):
+    """librarian_env shells out to the `env` CLI command and returns its output."""
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        return {"ok": True, "stdout": "librarian environment\n", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    result = mcp_server.librarian_env()
+    assert captured["args"] == ["env"]
+    assert "librarian environment" in result
+
+
 def test_out_does_not_double_error_prefix():
     """When the CLI already printed `ERROR: ...` to stdout, _out keeps one prefix.
 
