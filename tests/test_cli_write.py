@@ -622,6 +622,38 @@ def test_create_rejects_missing_required(sandbox):
     assert "missing required" in out.lower()
 
 
+def test_create_rejects_whitespace_id(sandbox):
+    """create refuses an id with whitespace.
+
+    The change ledger is space-delimited, so a whitespace id would be
+    truncated when parsed back and silently dropped by --changed-since. The
+    id must be a ledger-safe slug.
+    """
+    out, _, rc = sandbox.run("create", stdin=json.dumps(_new_entry(id="my entry")))
+    assert rc == 1
+    assert "not a valid id" in out.lower()
+
+
+def test_create_rejects_uppercase_id(sandbox):
+    """create enforces the same slug rule as rename-id (lowercase only)."""
+    out, _, rc = sandbox.run("create", stdin=json.dumps(_new_entry(id="2026-07-MixedCase")))
+    assert rc == 1
+    assert "not a valid id" in out.lower()
+
+
+def test_create_accepts_slug_id(sandbox):
+    """A normal slug id is accepted and round-trips through --changed-since.
+
+    Guards the end-to-end path the validation protects: a created entry must
+    be findable by its full id in a ledger-derived query.
+    """
+    out, _, rc = sandbox.run("create", stdin=json.dumps(_new_entry(id="2026-07-valid-slug")))
+    assert rc == 0
+    out, _, rc = sandbox.run("filter", "--changed-since", "2000-01-01", "--brief")
+    assert rc == 0
+    assert "2026-07-valid-slug" in out
+
+
 def test_create_rejects_bad_schema_block(sandbox):
     """create validates schema blocks and refuses an invalid one."""
     data = _new_entry(

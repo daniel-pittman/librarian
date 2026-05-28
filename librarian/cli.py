@@ -26,6 +26,7 @@ import csv
 import io
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -938,6 +939,20 @@ def _find_field_line(lines: list[str], start: int, end: int, field: str) -> int 
     return None
 
 
+# Entry ids must be ledger-safe slugs. The change ledger is space-delimited
+# (``<ts> <op> <id> label=...``), so an id containing whitespace would be
+# truncated to its first token when parsed back — breaking the ledger-derived
+# ``--changed-since`` / ``--changed-until`` lookups, which key on the full id.
+# Restrict ids to lowercase letters, digits and hyphens (also keeps cross-ref
+# rewriting in ``rename-id`` unambiguous).
+_VALID_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]*[a-z0-9]")
+
+
+def _is_valid_id(entry_id: str) -> bool:
+    """True if ``entry_id`` is a valid slug id (lowercase, digits, hyphens)."""
+    return bool(_VALID_ID_RE.fullmatch(entry_id))
+
+
 def _scan_list_items(
     lines: list[str], parent_idx: int, end: int
 ) -> tuple[list[tuple[int, str]], int | None, int]:
@@ -1008,6 +1023,10 @@ def cmd_create(ctx: Context, args: list[str]) -> int:
     missing = [f for f in ("id", "date", "title", "description", "tags") if f not in data]
     if missing:
         print(f"ERROR: missing required fields: {missing}")
+        return 1
+
+    if not _is_valid_id(str(data["id"])):
+        print(f"ERROR: '{data['id']}' is not a valid id (lowercase, digits, hyphens)")
         return 1
 
     _, activities = load_activities(ctx.paths.activities)
@@ -1691,8 +1710,6 @@ def cmd_rename_id(ctx: Context, args: list[str]) -> int:
     so an id is only rewritten when it appears as a whole token (a rename of
     ``ongoing-coi`` leaves ``ongoing-coi-training`` untouched).
     """
-    import re
-
     label = _resolve_label(args, required=True)
     if label is None:
         return 1
@@ -1703,7 +1720,7 @@ def cmd_rename_id(ctx: Context, args: list[str]) -> int:
     if old_id == new_id:
         print("ERROR: old-id and new-id are identical")
         return 1
-    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*[a-z0-9]", new_id):
+    if not _is_valid_id(new_id):
         print(f"ERROR: '{new_id}' is not a valid id (lowercase, digits, hyphens)")
         return 1
 
