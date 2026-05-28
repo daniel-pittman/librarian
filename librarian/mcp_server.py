@@ -201,7 +201,12 @@ def _validate_label(label: str) -> str:
 
 def _out(result: dict) -> str:
     """Return stdout, or an ERROR string built from stderr/stdout on failure."""
-    return result["stdout"] if result["ok"] else f"ERROR: {result['stderr'] or result['stdout']}"
+    if result["ok"]:
+        return result["stdout"]
+    msg = (result["stderr"] or result["stdout"]).strip()
+    # The CLI prints its own `ERROR: ...` to stdout on failure; don't double
+    # the prefix when we fall back to stdout.
+    return msg if msg.startswith("ERROR:") else f"ERROR: {msg}"
 
 
 def _capped(result: dict, cap: int = 50_000) -> str:

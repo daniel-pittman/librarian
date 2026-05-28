@@ -886,6 +886,42 @@ def test_filter_changed_until_includes_and_excludes(sandbox):
     assert out.strip() == "0"
 
 
+def test_filter_changed_until_bare_date_includes_same_day(sandbox):
+    """A bare-date --changed-until is inclusive of the whole day.
+
+    The write happens 'now' (e.g. 14:30Z); a date-only upper bound parses to
+    midnight, so without end-of-day normalization the same-day change is wrongly
+    dropped. Today's bare date must include it; yesterday's must exclude it.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    today = datetime.now(timezone.utc).date()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    today_str = today.isoformat()
+
+    sandbox.run("add-tags", "2026-04-self-study", "marker")
+
+    out, _, rc = sandbox.run("filter", "--changed-until", today_str, "--brief")
+    assert rc == 0
+    assert "2026-04-self-study" in out, "same-day change wrongly excluded by bare-date upper bound"
+
+    out, _, rc = sandbox.run("filter", "--changed-until", yesterday, "--count")
+    assert rc == 0
+    assert out.strip() == "0"
+
+
+def test_filter_changed_until_explicit_midnight_is_exact(sandbox):
+    """An explicit T-time upper bound is honored as-is (not end-of-day)."""
+    sandbox.run("add-tags", "2026-04-self-study", "marker")
+    # Explicit midnight today: a change made later today is after this instant.
+    from datetime import datetime, timezone
+
+    midnight = datetime.now(timezone.utc).date().isoformat() + "T00:00:00Z"
+    out, _, rc = sandbox.run("filter", "--changed-until", midnight, "--count")
+    assert rc == 0
+    assert out.strip() == "0"
+
+
 def test_filter_changed_since_with_tag_since_last_pull(sandbox):
     """The headline use case: tag + changed-since to find what to export.
 

@@ -830,6 +830,12 @@ def _apply_changed_window(
         until_dt = _parse_iso_utc(changed_until)
         if until_dt is None:
             raise ValueError(f"cannot parse --changed-until '{changed_until}'")
+        # A bare date as an *upper* bound should include the whole day, not
+        # just its 00:00:00 instant — otherwise `--changed-until 2026-05-28`
+        # silently drops every change made later that same day. An explicit
+        # time (anything with a 'T' or space separator) is honored as given.
+        if "T" not in changed_until and " " not in changed_until:
+            until_dt = until_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
 
     index = _ledger_change_index(ledger_path)
     kept = []

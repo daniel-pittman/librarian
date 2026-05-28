@@ -86,6 +86,18 @@ def test_out_surfaces_stderr_on_failure():
     assert mcp_server._out({"ok": False, "stdout": "", "stderr": "boom"}) == "ERROR: boom"
 
 
+def test_out_does_not_double_error_prefix():
+    """When the CLI already printed `ERROR: ...` to stdout, _out keeps one prefix.
+
+    cmd_filter/search/list print their own `ERROR: ...` to stdout and exit
+    non-zero; _out falls back to stdout when stderr is empty and must not
+    produce `ERROR: ERROR: ...`.
+    """
+    result = {"ok": False, "stdout": "ERROR: cannot parse --changed-since 'nope'", "stderr": ""}
+    assert mcp_server._out(result) == "ERROR: cannot parse --changed-since 'nope'"
+    assert not mcp_server._out(result).startswith("ERROR: ERROR:")
+
+
 def test_capped_surfaces_stderr_and_truncates():
     """_capped surfaces failures like _out and truncates long success output."""
     assert mcp_server._capped({"ok": False, "stdout": "", "stderr": "boom"}) == "ERROR: boom"
@@ -112,31 +124,31 @@ def test_changes_since_does_not_swallow_errors(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "tool,kwargs,expected_flags",
+    "tool,kwargs,expected_pairs",
     [
         (
             "librarian_filter",
             {"tag": "grant", "changed_since": "2026-05-01"},
-            ["--tag", "grant", "--changed-since", "2026-05-01"],
+            [("--tag", "grant"), ("--changed-since", "2026-05-01")],
         ),
         (
             "librarian_filter",
             {"changed_until": "2026-05-28"},
-            ["--changed-until", "2026-05-28"],
+            [("--changed-until", "2026-05-28")],
         ),
         (
             "librarian_list",
             {"changed_since": "2026-05-01"},
-            ["--changed-since", "2026-05-01"],
+            [("--changed-since", "2026-05-01")],
         ),
         (
             "librarian_search",
             {"query": "grant", "changed_since": "2026-05-01"},
-            ["--changed-since", "2026-05-01"],
+            [("--changed-since", "2026-05-01")],
         ),
     ],
 )
-def test_changed_window_params_translate_to_flags(monkeypatch, tool, kwargs, expected_flags):
+def test_changed_window_params_translate_to_flags(monkeypatch, tool, kwargs, expected_pairs):
     """The MCP wrappers forward changed_since/until as the matching CLI flags."""
     captured = {}
 
@@ -147,6 +159,8 @@ def test_changed_window_params_translate_to_flags(monkeypatch, tool, kwargs, exp
     monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
     getattr(mcp_server, tool)(**kwargs)
     args = captured["args"]
-    # Every expected flag/value appears in order-adjacent pairs.
-    for flag in expected_flags:
+    # Each flag must be immediately followed by its value (order-adjacent).
+    for flag, value in expected_pairs:
         assert flag in args, f"{flag} missing from {args}"
+        i = args.index(flag)
+        assert args[i : i + 2] == [flag, value], f"{flag} not adjacent to {value} in {args}"
