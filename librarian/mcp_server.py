@@ -503,7 +503,7 @@ def librarian_set_block(entry_id: str, block: str, fields_json: str, session_lab
     label = _validate_label(session_label)
     return _out(
         _run_cli(
-            ["set-block", entry_id, block, fields_json],
+            ["set-block", entry_id, block, "--json", fields_json],
             extra_env={"LIBRARIAN_SESSION_LABEL": label},
         )
     )

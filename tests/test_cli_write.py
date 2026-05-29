@@ -366,6 +366,7 @@ def test_set_block_adds_full_block_to_existing_entry(sandbox):
         "set-block",
         "2026-09-sb-target",
         "cpe",
+        "--json",
         json.dumps({"group": "primary", "credits": 10, "submitted": True, "notes": "ten credits"}),
     )
     assert rc == 0
@@ -384,6 +385,7 @@ def test_set_block_preserves_existing_block_and_core_fields(sandbox):
         "set-block",
         "2026-09-sb-target",
         "cpe",
+        "--json",
         json.dumps({"group": "primary", "credits": 5}),
     )
     after = sandbox.entry("2026-09-sb-target")
@@ -395,7 +397,7 @@ def test_set_block_preserves_existing_block_and_core_fields(sandbox):
 def test_set_block_rejects_unknown_block(sandbox):
     """A block name not declared by the schema is rejected."""
     sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
-    out, _, rc = sandbox.run("set-block", "2026-09-sb-target", "nope", "{}")
+    out, _, rc = sandbox.run("set-block", "2026-09-sb-target", "nope", "--json", '{"a": 1}')
     assert rc == 1
     assert "not declared" in out.lower()
 
@@ -407,6 +409,7 @@ def test_set_block_rejects_unknown_field(sandbox):
         "set-block",
         "2026-09-sb-target",
         "cpe",
+        "--json",
         json.dumps({"group": "primary", "credits": 1, "oops": "x"}),
     )
     assert rc == 1
@@ -420,6 +423,7 @@ def test_set_block_rejects_missing_required(sandbox):
         "set-block",
         "2026-09-sb-target",
         "cpe",
+        "--json",
         json.dumps({"group": "primary"}),  # missing credits
     )
     assert rc == 1
@@ -433,6 +437,7 @@ def test_set_block_rejects_bad_enum_value(sandbox):
         "set-block",
         "2026-09-sb-target",
         "cpe",
+        "--json",
         json.dumps({"group": "bogus", "credits": 1}),
     )
     assert rc == 1
@@ -446,17 +451,22 @@ def test_set_block_refuses_when_block_already_present(sandbox):
         "set-block",
         "2026-09-sb-target",
         "ptr",
+        "--json",
         json.dumps({"category": "scholarly", "subcategory": "cat3-other"}),
     )
     assert rc == 1
     assert "already present" in out.lower()
-    assert "update-block-field" in out.lower()
+    # The error must name a real CLI command (update-nested-field), not the
+    # MCP-side tool name (update-block-field), which would point users at a
+    # non-existent CLI command.
+    assert "update-nested-field" in out.lower()
+    assert "update-block-field" not in out.lower()
 
 
 def test_set_block_rejects_invalid_json(sandbox):
     """A non-JSON payload is a clean error, not a crash."""
     sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
-    out, _, rc = sandbox.run("set-block", "2026-09-sb-target", "cpe", "not-json")
+    out, _, rc = sandbox.run("set-block", "2026-09-sb-target", "cpe", "--json", "not-json")
     assert rc == 1
     assert "not valid json" in out.lower()
 
@@ -464,7 +474,7 @@ def test_set_block_rejects_invalid_json(sandbox):
 def test_set_block_rejects_non_object_payload(sandbox):
     """The block payload must be a JSON object, not a list/string/etc."""
     sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
-    out, _, rc = sandbox.run("set-block", "2026-09-sb-target", "cpe", "[1,2,3]")
+    out, _, rc = sandbox.run("set-block", "2026-09-sb-target", "cpe", "--json", "[1,2,3]")
     assert rc == 1
     assert "json object" in out.lower()
 
@@ -473,7 +483,11 @@ def test_set_block_rejects_unknown_entry(sandbox):
     """An unknown entry id errors out without writing."""
     before = _line_count(sandbox.activities)
     out, _, rc = sandbox.run(
-        "set-block", "no-such-entry", "cpe", json.dumps({"group": "primary", "credits": 1})
+        "set-block",
+        "no-such-entry",
+        "cpe",
+        "--json",
+        json.dumps({"group": "primary", "credits": 1}),
     )
     assert rc == 1
     assert "not found" in out.lower()
@@ -487,6 +501,7 @@ def test_set_block_requires_session_label(sandbox):
         "set-block",
         "2026-09-sb-target",
         "cpe",
+        "--json",
         json.dumps({"group": "primary", "credits": 1}),
         extra_env={"LIBRARIAN_SESSION_LABEL": ""},
     )
@@ -501,6 +516,7 @@ def test_set_block_writes_ledger_entry(sandbox):
         "set-block",
         "2026-09-sb-target",
         "cpe",
+        "--json",
         json.dumps({"group": "primary", "credits": 1}),
     )
     text = sandbox.ledger.read_text()
@@ -516,6 +532,7 @@ def test_set_block_no_partial_write_on_validation_failure(sandbox):
         "set-block",
         "2026-09-sb-target",
         "cpe",
+        "--json",
         json.dumps({"group": "primary"}),  # missing required credits
     )
     assert sandbox.activities.read_text() == before
@@ -529,6 +546,7 @@ def test_set_block_does_not_affect_other_entries(sandbox):
         "set-block",
         "2026-09-sb-target",
         "cpe",
+        "--json",
         json.dumps({"group": "primary", "credits": 1}),
     )
     assert sandbox.entry("2025-04-journal-article") == untouched_before
@@ -541,6 +559,7 @@ def test_set_block_renders_int_unquoted_so_it_parses_back_as_int(sandbox):
         "set-block",
         "2026-09-sb-target",
         "cpe",
+        "--json",
         json.dumps({"group": "primary", "credits": 42}),
     )
     assert isinstance(sandbox.entry("2026-09-sb-target")["cpe"]["credits"], int)
@@ -553,11 +572,214 @@ def test_set_block_renders_bool_unquoted_so_it_parses_back_as_bool(sandbox):
         "set-block",
         "2026-09-sb-target",
         "cpe",
+        "--json",
         json.dumps({"group": "primary", "credits": 1, "submitted": False}),
     )
     cpe = sandbox.entry("2026-09-sb-target")["cpe"]
     assert cpe["submitted"] is False
     assert isinstance(cpe["submitted"], bool)
+
+
+def test_set_block_accepts_json_on_stdin(sandbox):
+    """JSON may be piped on stdin instead of supplied via --json."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        stdin=json.dumps({"group": "primary", "credits": 5}),
+    )
+    assert rc == 0
+    assert sandbox.entry("2026-09-sb-target")["cpe"]["credits"] == 5
+
+
+def test_set_block_does_not_collide_with_docs_in_description_prose(sandbox):
+    """A description body line beginning with 'docs:' must not be mistaken for
+    the entry's docs: field; the new block must still land in the right place
+    and the description must survive intact."""
+    entry = _ptr_only_entry(description="Preamble.\ndocs: see appendix.")
+    sandbox.run("create", stdin=json.dumps(entry))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps({"group": "primary", "credits": 7}),
+    )
+    assert rc == 0
+    e = sandbox.entry("2026-09-sb-target")
+    assert e["cpe"]["credits"] == 7
+    assert "see appendix" in e["description"]
+
+
+def test_set_block_does_not_refuse_block_name_in_description_prose(sandbox):
+    """A description body line beginning with the block name as prose must not
+    trip the 'block already present' guard."""
+    entry = _ptr_only_entry(description="Preamble.\ncpe: this is just prose text.")
+    sandbox.run("create", stdin=json.dumps(entry))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps({"group": "primary", "credits": 1}),
+    )
+    assert rc == 0
+    assert sandbox.entry("2026-09-sb-target")["cpe"]["credits"] == 1
+
+
+def test_set_block_bool_case_insensitive(sandbox):
+    """`"TRUE"` / `"YES"` for a bool field must round-trip as True, not False.
+
+    validate_block accepts these case-insensitively; set-block coerces them to
+    real bools before rendering, so the user's intent isn't silently flipped.
+    """
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps({"group": "primary", "credits": 1, "submitted": "TRUE"}),
+    )
+    cpe = sandbox.entry("2026-09-sb-target")["cpe"]
+    assert cpe["submitted"] is True
+
+
+def test_set_block_rejects_text_with_newline(sandbox):
+    """Multi-line text values would break the single-line YAML splice."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps({"group": "primary", "credits": 1, "notes": "line1\nline2"}),
+    )
+    assert rc == 1
+    assert "newline" in out.lower()
+
+
+def test_set_block_coerces_stringy_int_to_native_int(sandbox):
+    """`"08"` for an int field must coerce to native int 8, not persist as a string."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps({"group": "primary", "credits": "08"}),
+    )
+    cpe = sandbox.entry("2026-09-sb-target")["cpe"]
+    assert cpe["credits"] == 8
+    assert isinstance(cpe["credits"], int)
+
+
+def test_set_block_existence_check_runs_before_validation(sandbox):
+    """The already-present error fires before schema validation.
+
+    The user gets the actionable error, not a validation report that turns out
+    to be moot once they fix the JSON.
+    """
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "ptr",
+        "--json",
+        json.dumps({"category": "bogus", "subcategory": "also-bogus"}),
+    )
+    assert rc == 1
+    assert "already present" in out.lower()
+    assert "INVALID" not in out
+
+
+def test_set_block_generic_mode_error(sandbox):
+    """Without an active schema, set-block reports 'no schema configured'."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    sandbox.schema.unlink()  # remove schema.yaml so the context is empty
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps({"group": "primary", "credits": 1}),
+    )
+    assert rc == 1
+    assert "no schema configured" in out.lower()
+
+
+def test_set_block_rejects_empty_payload(sandbox):
+    """An empty payload would render a degenerate `block:` with no children."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run("set-block", "2026-09-sb-target", "cpe", "--json", "{}")
+    assert rc == 1
+    assert "empty" in out.lower()
+
+
+def test_set_block_reports_multiple_validation_issues(sandbox):
+    """validate_block emits all issues; set-block must print all of them.
+
+    Pins the multi-issue surface so a future regression that `break`s after
+    the first issue does not pass silently.
+    """
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps({"group": "bogus"}),  # bad enum AND missing required credits
+    )
+    assert rc == 1
+    assert "INVALID CPE.GROUP" in out
+    assert "MISSING CPE.CREDITS" in out
+
+
+def test_set_block_inserts_correctly_when_end_date_present(sandbox):
+    """The insertion-point logic works for entries with end_date between date and docs."""
+    entry = _ptr_only_entry(end_date="2026-09-30")
+    sandbox.run("create", stdin=json.dumps(entry))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps({"group": "primary", "credits": 3}),
+    )
+    assert rc == 0
+    e = sandbox.entry("2026-09-sb-target")
+    assert e["end_date"] == "2026-09-30"
+    assert e["cpe"]["credits"] == 3
+
+
+def test_set_block_adds_earlier_schema_block_to_cpe_only_entry(sandbox):
+    """Adding a block when another block already exists keeps both intact.
+
+    Exercises the case where the new block is not the only block on the entry
+    (covers the placement-among-existing-blocks path).
+    """
+    entry = {
+        "id": "2026-09-cpe-only",
+        "date": "2026-09-01",
+        "title": "cpe only",
+        "description": "An entry with only a cpe block.",
+        "tags": ["t"],
+        "docs": ["https://example.com/a"],
+        "cpe": {"group": "primary", "credits": 5},
+    }
+    sandbox.run("create", stdin=json.dumps(entry))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-cpe-only",
+        "ptr",
+        "--json",
+        json.dumps({"category": "service", "subcategory": "external-professional"}),
+    )
+    assert rc == 0
+    e = sandbox.entry("2026-09-cpe-only")
+    assert e["ptr"]["category"] == "service"
+    assert e["cpe"]["credits"] == 5
 
 
 def test_update_nested_field_rejects_unknown_path(sandbox):

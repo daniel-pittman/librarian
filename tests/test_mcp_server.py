@@ -110,6 +110,7 @@ def test_set_block_tool_translates_to_cli(monkeypatch):
         "set-block",
         "2026-09-target",
         "cpe",
+        "--json",
         '{"group":"primary","credits":10}',
     ]
     assert captured["env"] == {"LIBRARIAN_SESSION_LABEL": "mcp:test"}
