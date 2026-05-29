@@ -361,4 +361,4 @@ def test_version(sandbox):
     """The --version flag prints the version string."""
     out, _, rc = sandbox.run("--version")
     assert rc == 0
-    assert out.strip() == "1.3.0"
+    assert out.strip() == "1.4.0"

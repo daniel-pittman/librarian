@@ -941,6 +941,28 @@ def _find_field_line(lines: list[str], start: int, end: int, field: str) -> int 
     return None
 
 
+def _find_entry_field_line(lines: list[str], start: int, end: int, field: str) -> int | None:
+    """Like :func:`_find_field_line` but indent-anchored to entry fields.
+
+    Returns the index of ``<field>:`` only when the line sits at the entry's
+    top-level field indent (the ``- id:`` line's indent plus two). This avoids
+    matches inside a description literal-block body (e.g. prose containing
+    ``docs:`` or a block name), which would otherwise let the caller splice
+    into the middle of the description or refuse a legitimate write.
+    """
+    expected_indent = line_indent(lines[start]) + 2
+    for i in range(start, end):
+        if line_indent(lines[i]) != expected_indent:
+            continue
+        stripped = lines[i].lstrip()
+        # Recognize both `field:` and `field :` (space-before-colon). The
+        # latter is tolerated by find_entry_line_range, so a hand-edited
+        # entry can reach the duplicate-block guard with that form.
+        if stripped.startswith(f"{field}:") or stripped.startswith(f"{field} :"):
+            return i
+    return None
+
+
 # Entry ids must be ledger-safe slugs. The change ledger is space-delimited
 # (``<ts> <op> <id> label=...``), so an id containing whitespace would be
 # truncated to its first token when parsed back — breaking the ledger-derived
@@ -1206,7 +1228,13 @@ def _render_scalar(field, value) -> str:
     if field.type == "int":
         return str(value)
     if field.type == "bool":
-        return "true" if value in (True, "true", "yes", "1") else "false"
+        # Case-insensitive on string input so "TRUE"/"YES"/"True" don't get
+        # silently flipped to false (validate_block already accepts these).
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, str) and value.strip().lower() in ("true", "yes", "1"):
+            return "true"
+        return "false"
     return yaml_quote(str(value))
 
 
@@ -1510,12 +1538,14 @@ def cmd_update_nested_field(ctx: Context, args: list[str]) -> int:
         return 1
 
     # Validate the new value in the context of the entry's current block data,
-    # so dependent enums resolve against the live parent value.
+    # so dependent enums resolve against the live parent value. Filter by the
+    # precise `BLOCK.FIELD:` label rather than a bare substring so issues
+    # about unrelated sibling fields don't leak into this update's error path
+    # (a substring like "CATEGORY" would otherwise match "PTR.SUBCATEGORY:").
     block_data = dict(entry.get(block_name) or {})
     block_data[field_name] = coerced
-    issues = [
-        issue for issue in validate_block(block_def, block_data) if field_name.upper() in issue
-    ]
+    label_prefix = f"{block_name.upper()}.{field_name.upper()}:"
+    issues = [issue for issue in validate_block(block_def, block_data) if label_prefix in issue]
     if issues:
         for issue in issues:
             print(f"ERROR: {issue}")
@@ -1569,6 +1599,177 @@ def cmd_update_nested_field(ctx: Context, args: list[str]) -> int:
         f"{path}={raw_value[:80]}({action})",
     )
     print(f"{action.capitalize()} {path}={raw_value} on '{entry_id}'")
+    return 0
+
+
+def cmd_set_block(ctx: Context, args: list[str]) -> int:
+    """Add a schema block to an existing entry.
+
+    ``set-block <id> <block> [--json <json>]`` (also accepts JSON on stdin).
+    The block must be declared by the active schema and must NOT already be
+    present on the entry (use ``update-nested-field`` to edit existing
+    fields). The supplied JSON object is validated as a complete block
+    against the schema before any write: unknown fields are rejected, and
+    required fields must be present.
+    """
+    label = _resolve_label(args, required=True)
+    if label is None:
+        return 1
+
+    # Reject `-h`/`--help` mixed with positional/`--json` args. argparse
+    # short-circuits on help anywhere in argv and exits 0, which would
+    # otherwise turn `set-block <id> <block> -h ...` into a silent no-op
+    # that returns success without performing the write.
+    if ("-h" in args or "--help" in args) and len(args) > 1:
+        print("ERROR: -h/--help must be used alone (no other arguments)")
+        return 2
+
+    # Accept JSON via --json or stdin (matching cmd_create) so a CLI user can
+    # supply whitespace-sensitive content without losing it to argv joining.
+    parser = argparse.ArgumentParser(prog="librarian set-block")
+    parser.add_argument("entry_id")
+    parser.add_argument("block")
+    parser.add_argument("--json", help="block fields as a JSON string")
+    try:
+        parsed = parser.parse_args(args)
+    except SystemExit as exc:
+        # argparse exits 0 for --help and 2 for a usage error; preserve that
+        # so `set-block -h` (used alone) returns 0 instead of looking like
+        # a failure.
+        return int(exc.code) if isinstance(exc.code, int) else 1
+    entry_id, block_name = parsed.entry_id, parsed.block
+
+    if parsed.json is not None:
+        raw_json = parsed.json
+    elif not sys.stdin.isatty():
+        raw_json = sys.stdin.read()
+    else:
+        print("ERROR: provide block fields with --json '<json>' or pipe JSON on stdin")
+        return 1
+
+    # Distinguish "no schema at all" from "schema present but missing this block"
+    # so the error guides the right fix.
+    if ctx.schema.is_empty:
+        print("ERROR: no schema configured; set-block requires an active schema")
+        return 1
+    block_def = ctx.schema.block(block_name)
+    if block_def is None:
+        print(f"ERROR: block '{block_name}' is not declared by the active schema")
+        return 1
+
+    try:
+        block_data = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        print(f"ERROR: block fields are not valid JSON: {exc}")
+        return 1
+    if not isinstance(block_data, dict):
+        print("ERROR: block fields must be a JSON object")
+        return 1
+    if not block_data:
+        print(f"ERROR: block payload is empty; supply at least one field for '{block_name}'")
+        return 1
+
+    # Reject unknown fields so typos surface immediately, before validation.
+    known_fields = {f.name for f in block_def.fields}
+    unknown = sorted(k for k in block_data if k not in known_fields)
+    if unknown:
+        print(f"ERROR: unknown field(s) for block '{block_name}': {unknown}")
+        return 1
+
+    lines = read_lines(ctx.paths.activities)
+    start, end = find_entry_line_range(lines, entry_id)
+    if start is None:
+        print(f"ERROR: entry '{entry_id}' not found")
+        return 1
+
+    # Existence check BEFORE value-level validation (newline / coerce /
+    # validate_block) so a user who hits set-block on an entry that already
+    # has the block gets the actionable error rather than a value report
+    # that turns out to be moot. Structural-input errors (bad JSON, unknown
+    # fields, empty payload) still fire first, since those have to be sorted
+    # out before existence even matters.
+    if _find_entry_field_line(lines, start, end, block_name) is not None:
+        print(
+            f"ERROR: block '{block_name}' already present on entry '{entry_id}'. "
+            f"Use update-nested-field to edit its fields."
+        )
+        return 1
+
+    # Reject any string value containing a newline, regardless of its declared
+    # schema type. yaml_quote emits a single-quoted scalar that can't carry a
+    # raw LF, so the splice would corrupt the file on the next read. A
+    # type-agnostic guard (any str) closes the entire bug class, including
+    # date / date? values whose ISO regex happily anchors before a trailing LF.
+    for fname, val in block_data.items():
+        if isinstance(val, str) and ("\n" in val or "\r" in val):
+            print(
+                f"ERROR: field '{fname}' contains a newline; "
+                f"multi-line values are not supported by set-block "
+                f"(write the entry's description instead)"
+            )
+            return 1
+
+    # Coerce stringy primitives (int, bool, date) to their native types before
+    # validation, so e.g. {"credits": "08"} becomes int 8 and round-trips as a
+    # number rather than persisting as the string "08". Errors here use the
+    # same INVALID BLOCK.FIELD shape that validate_block uses, for consistency.
+    for fdef in block_def.fields:
+        raw = block_data.get(fdef.name)
+        if isinstance(raw, str) and fdef.type in ("int", "bool", "date", "date?"):
+            try:
+                block_data[fdef.name] = coerce_value(fdef, raw)
+            except ValueError as exc:
+                print(f"ERROR: INVALID {block_name.upper()}.{fdef.name.upper()}: {exc}")
+                return 1
+
+    # Validate the entire block atomically (catches missing required fields,
+    # bad enum values, dependent-enum mismatches, etc.).
+    issues = validate_block(block_def, block_data)
+    if issues:
+        for issue in issues:
+            print(f"ERROR: {issue}")
+        return 1
+
+    # Insertion point: preserve the schema-declaration order that _render_entry
+    # establishes at create time. Walk schema.blocks AFTER this one and splice
+    # before the first such later-in-schema block already on the entry; fall
+    # back to inserting before `docs:` only when no later block exists. This
+    # matters because `merge` (the next PR) will repeatedly carry blocks across
+    # entries, and divergence from schema order would compound across merges.
+    schema_block_names = [b.name for b in ctx.schema.blocks]
+    insert_idx = None
+    for later_name in schema_block_names[schema_block_names.index(block_name) + 1 :]:
+        candidate = _find_entry_field_line(lines, start, end, later_name)
+        if candidate is not None:
+            insert_idx = candidate
+            break
+    if insert_idx is None:
+        # No later block already present: place just before docs: (the natural
+        # next field after blocks in the core -> blocks -> docs -> tags layout).
+        insert_idx = _find_entry_field_line(lines, start, end, "docs")
+    if insert_idx is None:
+        print(f"ERROR: could not locate insertion point ('docs:' field missing on '{entry_id}')")
+        return 1
+
+    field_indent = line_indent(lines[insert_idx])
+    sub_indent = field_indent + 2
+    new_lines = [f"{' ' * field_indent}{block_name}:\n"]
+    for fdef in block_def.fields:
+        if fdef.name not in block_data:
+            continue
+        rendered = _render_scalar(fdef, block_data[fdef.name])
+        new_lines.append(f"{' ' * sub_indent}{fdef.name}: {rendered}\n")
+
+    lines[insert_idx:insert_idx] = new_lines
+    write_lines(ctx.paths.activities, lines)
+    append_ledger(
+        ctx.paths.ledger,
+        "set-block",
+        entry_id,
+        label,
+        f"block={block_name} fields={len(block_data)}",
+    )
+    print(f"Added block '{block_name}' to '{entry_id}' with {len(block_data)} field(s)")
     return 0
 
 
@@ -2243,6 +2444,7 @@ COMMANDS = {
     "update-description": cmd_update_description,
     "update-notes": cmd_update_notes,
     "update-nested-field": cmd_update_nested_field,
+    "set-block": cmd_set_block,
     "add-tags": cmd_add_tags,
     "remove-tags": cmd_remove_tags,
     "add-docs": cmd_add_docs,

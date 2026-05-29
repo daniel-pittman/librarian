@@ -66,7 +66,9 @@ by a **pluggable schema** you choose. It ships as:
 ## Features
 
 - **Pluggable schema** — structured "blocks" (review classification, credit
-  tracking, ...) are declared in a `schema.yaml`, not hardcoded.
+  tracking, ...) are declared in a `schema.yaml`, not hardcoded. Add a block to
+  an existing entry with `set-block <id> <block> <json>`; the whole block is
+  validated atomically before the write.
 - **Four bundled schemas** — performance review, post-tenure review,
   certification credits, student portfolio.
 - **Full-text and structured search** — `search`, `filter`, `list`, `project`,
@@ -373,8 +375,8 @@ default.
 `validate`, `export`, `project`, `similar`, `contact`, `changes`, `schema`, `env`
 
 **Write:** `create`, `update-field`, `update-description`, `update-notes`,
-`update-nested-field`, `add-tags`, `remove-tags`, `add-docs`, `remove-docs`,
-`delete`, `rename-id`
+`update-nested-field`, `set-block`, `add-tags`, `remove-tags`, `add-docs`,
+`remove-docs`, `delete`, `rename-id`
 
 **File inventory:** `file-add`, `file-list`, `file-get`, `file-move`,
 `file-update`, `file-rehash`, `file-search`
