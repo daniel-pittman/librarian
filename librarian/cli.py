@@ -1616,8 +1616,10 @@ def cmd_set_block(ctx: Context, args: list[str]) -> int:
     parser.add_argument("--json", help="block fields as a JSON string")
     try:
         parsed = parser.parse_args(args)
-    except SystemExit:
-        return 1
+    except SystemExit as exc:
+        # argparse exits 0 for --help and 2 for a usage error; preserve that
+        # so `set-block -h` returns 0 instead of looking like a failure.
+        return int(exc.code) if isinstance(exc.code, int) else 1
     entry_id, block_name = parsed.entry_id, parsed.block
 
     if parsed.json is not None:
@@ -1657,28 +1659,17 @@ def cmd_set_block(ctx: Context, args: list[str]) -> int:
         print(f"ERROR: unknown field(s) for block '{block_name}': {unknown}")
         return 1
 
-    # Reject newline-containing text values: yaml_quote produces single-quoted
-    # scalars that can't carry a raw LF, so the splice would corrupt the file.
+    # Reject newline-containing string-bearing values: yaml_quote emits a
+    # single-quoted scalar that can't carry a raw LF, so the splice would
+    # corrupt the file. Covers text, string, and (defensively) enum.
     for fdef in block_def.fields:
-        if fdef.type == "text" and isinstance(block_data.get(fdef.name), str):
+        if fdef.type in ("text", "string", "enum") and isinstance(block_data.get(fdef.name), str):
             if "\n" in block_data[fdef.name] or "\r" in block_data[fdef.name]:
                 print(
                     f"ERROR: field '{fdef.name}' contains a newline; "
-                    f"multi-line text in blocks is not supported by set-block "
+                    f"multi-line values are not supported by set-block "
                     f"(write the entry's description instead)"
                 )
-                return 1
-
-    # Coerce stringy primitives (int, bool, date) to their native types before
-    # validation, so e.g. {"credits": "08"} becomes int 8 and round-trips as a
-    # number rather than persisting as the string "08". Matches update-nested-field.
-    for fdef in block_def.fields:
-        raw = block_data.get(fdef.name)
-        if isinstance(raw, str) and fdef.type in ("int", "bool", "date", "date?"):
-            try:
-                block_data[fdef.name] = coerce_value(fdef, raw)
-            except ValueError as exc:
-                print(f"ERROR: field '{fdef.name}': {exc}")
                 return 1
 
     lines = read_lines(ctx.paths.activities)
@@ -1687,15 +1678,28 @@ def cmd_set_block(ctx: Context, args: list[str]) -> int:
         print(f"ERROR: entry '{entry_id}' not found")
         return 1
 
-    # Existence check before schema validation: a user who runs set-block on
-    # an entry that already has the block gets the actionable error, not a
-    # validation report that turns out to be moot.
+    # Existence check BEFORE coerce + schema validation: a user who runs
+    # set-block on an entry that already has the block gets the actionable
+    # error, not a report (from validate or coerce) that turns out to be moot.
     if _find_entry_field_line(lines, start, end, block_name) is not None:
         print(
             f"ERROR: block '{block_name}' already present on entry '{entry_id}'. "
             f"Use update-nested-field to edit its fields."
         )
         return 1
+
+    # Coerce stringy primitives (int, bool, date) to their native types before
+    # validation, so e.g. {"credits": "08"} becomes int 8 and round-trips as a
+    # number rather than persisting as the string "08". Errors here use the
+    # same INVALID BLOCK.FIELD shape that validate_block uses, for consistency.
+    for fdef in block_def.fields:
+        raw = block_data.get(fdef.name)
+        if isinstance(raw, str) and fdef.type in ("int", "bool", "date", "date?"):
+            try:
+                block_data[fdef.name] = coerce_value(fdef, raw)
+            except ValueError as exc:
+                print(f"ERROR: INVALID {block_name.upper()}.{fdef.name.upper()}: {exc}")
+                return 1
 
     # Validate the entire block atomically (catches missing required fields,
     # bad enum values, dependent-enum mismatches, etc.).
@@ -1705,16 +1709,28 @@ def cmd_set_block(ctx: Context, args: list[str]) -> int:
             print(f"ERROR: {issue}")
         return 1
 
-    # Insert the new block just before the entry's `docs:` line, so it joins
-    # any existing blocks in the standard core->blocks->docs->tags order.
-    # Indent-anchored search so a description body line containing "docs:"
-    # cannot be mistaken for the field.
-    docs_idx = _find_entry_field_line(lines, start, end, "docs")
-    if docs_idx is None:
+    # Insertion point: preserve the schema-declaration order that _render_entry
+    # establishes at create time. Walk schema.blocks AFTER this one and splice
+    # before the first such later-in-schema block already on the entry; fall
+    # back to inserting before `docs:` only when no later block exists. This
+    # matters because `merge` (the next PR) will repeatedly carry blocks across
+    # entries, and divergence from schema order would compound across merges.
+    schema_block_names = [b.name for b in ctx.schema.blocks]
+    insert_idx = None
+    for later_name in schema_block_names[schema_block_names.index(block_name) + 1 :]:
+        candidate = _find_entry_field_line(lines, start, end, later_name)
+        if candidate is not None:
+            insert_idx = candidate
+            break
+    if insert_idx is None:
+        # No later block already present: place just before docs: (the natural
+        # next field after blocks in the core -> blocks -> docs -> tags layout).
+        insert_idx = _find_entry_field_line(lines, start, end, "docs")
+    if insert_idx is None:
         print(f"ERROR: could not locate insertion point ('docs:' field missing on '{entry_id}')")
         return 1
 
-    field_indent = line_indent(lines[docs_idx])
+    field_indent = line_indent(lines[insert_idx])
     sub_indent = field_indent + 2
     new_lines = [f"{' ' * field_indent}{block_name}:\n"]
     for fdef in block_def.fields:
@@ -1723,7 +1739,7 @@ def cmd_set_block(ctx: Context, args: list[str]) -> int:
         rendered = _render_scalar(fdef, block_data[fdef.name])
         new_lines.append(f"{' ' * sub_indent}{fdef.name}: {rendered}\n")
 
-    lines[docs_idx:docs_idx] = new_lines
+    lines[insert_idx:insert_idx] = new_lines
     write_lines(ctx.paths.activities, lines)
     append_ledger(
         ctx.paths.ledger,

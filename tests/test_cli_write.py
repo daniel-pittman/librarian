@@ -782,6 +782,114 @@ def test_set_block_adds_earlier_schema_block_to_cpe_only_entry(sandbox):
     assert e["cpe"]["credits"] == 5
 
 
+def test_set_block_rejects_string_field_with_newline(sandbox):
+    """A type='string' field (e.g. cpe.domain) with a newline must be rejected.
+
+    The previous fix only guarded type='text'; a multi-line string would still
+    have spliced a literal LF into a single-quoted YAML scalar and corrupted
+    the file on the next read.
+    """
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps({"group": "primary", "credits": 1, "domain": "line1\nline2"}),
+    )
+    assert rc == 1
+    assert "newline" in out.lower()
+
+
+def test_set_block_existence_check_runs_before_coerce(sandbox):
+    """The already-present error must fire even when coercion would have erred.
+
+    coerce_value runs after the existence check now; an un-coercible value
+    against an existing-block entry must surface the existence error, not the
+    coerce error (which would be moot once the user fixes the JSON).
+    """
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    # _ptr_only_entry has ptr; try to set ptr with junk - but ptr has no int
+    # fields, so test the case the reviewer raised: add cpe, then re-add cpe
+    # with a stringy int that would fail coerce.
+    sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps({"group": "primary", "credits": 1}),
+    )
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps({"group": "primary", "credits": "not-an-int"}),
+    )
+    assert rc == 1
+    assert "already present" in out.lower()
+    assert "not-an-int" not in out  # coerce error did not run
+
+
+def test_set_block_coerce_error_matches_validate_format(sandbox):
+    """Coerce errors use the same INVALID BLOCK.FIELD shape as validate_block."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps({"group": "primary", "credits": "not-an-int"}),
+    )
+    assert rc == 1
+    assert "INVALID CPE.CREDITS" in out
+
+
+def test_set_block_help_exits_zero(sandbox):
+    """`set-block -h` prints the help text and returns exit code 0."""
+    out, _, rc = sandbox.run("set-block", "-h")
+    assert rc == 0
+    assert "set-block" in out.lower()
+
+
+def test_set_block_inserts_in_schema_declaration_order(sandbox):
+    """Adding an earlier-in-schema block to a later-block-only entry preserves order.
+
+    Schema declares ptr then cpe. An entry that has only `cpe` and receives
+    `ptr` via set-block must end up with `ptr` lines BEFORE `cpe` lines in the
+    file, matching the order _render_entry establishes at create time. This
+    keeps the hand-formatted invariant stable as `merge` (the next PR) starts
+    repeatedly carrying blocks across entries.
+    """
+    entry = {
+        "id": "2026-09-order-target",
+        "date": "2026-09-01",
+        "title": "order target",
+        "description": "cpe-only entry receiving ptr later.",
+        "tags": ["t"],
+        "docs": ["https://example.com/a"],
+        "cpe": {"group": "primary", "credits": 5},
+    }
+    sandbox.run("create", stdin=json.dumps(entry))
+    sandbox.run(
+        "set-block",
+        "2026-09-order-target",
+        "ptr",
+        "--json",
+        json.dumps({"category": "service", "subcategory": "external-professional"}),
+    )
+    text = sandbox.activities.read_text()
+    # Find the file positions of `    ptr:` and `    cpe:` lines for this entry.
+    # Pick the occurrences that follow the entry's id to scope to this entry.
+    entry_marker = text.index("- id: 2026-09-order-target")
+    ptr_pos = text.index("ptr:", entry_marker)
+    cpe_pos = text.index("cpe:", entry_marker)
+    assert ptr_pos < cpe_pos, (
+        f"ptr block should precede cpe block in schema-declaration order; "
+        f"got ptr at {ptr_pos}, cpe at {cpe_pos}"
+    )
+
+
 def test_update_nested_field_rejects_unknown_path(sandbox):
     """update-nested-field rejects a block/field the schema does not declare."""
     out, _, rc = sandbox.run("update-nested-field", "2025-02-conference-talk", "ptr.bogus", "x")
