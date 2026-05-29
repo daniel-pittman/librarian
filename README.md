@@ -105,7 +105,9 @@ by a **pluggable schema** you choose. It ships as:
   your descriptions and queryable by name or email fragment.
 - **Safe cross-references** — `rename-id` repoints every backticked **and**
   plain-text reference to an entry across the corpus, token-bounded so longer
-  ids aren't matched as substrings.
+  ids aren't matched as substrings. `delete <id> --repoint-to <target>` reuses
+  the same rewriter, so deleting an entry can rewrite its inbound references
+  to a successor in the same call instead of leaving dangling links behind.
 - **Tag normalization** — `tag-audit` flags case and separator variants of the
   same tag (e.g. `Build-A-Bot` vs `build-a-bot`) so they don't fragment your
   index over time.
