@@ -1300,6 +1300,8 @@ def cmd_delete(ctx: Context, args: list[str]) -> int:
     if label is None:
         return 1
     # Pre-screen -h alongside other args, matching set-block's safety pattern.
+    # Safe to compare argv tokens directly here: _is_valid_id forbids entry ids
+    # that start with `-`, so a user can never legitimately name an entry "-h".
     if ("-h" in args or "--help" in args) and len(args) > 1:
         print("ERROR: -h/--help must be used alone (no other arguments)")
         return 2
@@ -1353,9 +1355,12 @@ def cmd_delete(ctx: Context, args: list[str]) -> int:
 
     # Repoint inbound references first (skipping the soon-to-be-deleted source
     # range so a self-ref in source's own description can't inflate the count),
-    # then remove the source entry's lines.
+    # then remove the source entry's lines. Capture the helper's return value
+    # rather than reusing the dry-run pre-count, so the ledger entry can never
+    # drift from what the helper actually rewrote on disk — merge (PR 3) will
+    # widen this surface, and the pre-count loop wouldn't see those edits.
     if repoint_to is not None:
-        _repoint_references(lines, entry_id, repoint_to, skip_range=(start, end))
+        repoint_count = _repoint_references(lines, entry_id, repoint_to, skip_range=(start, end))
     del lines[start:end]
     write_lines(ctx.paths.activities, lines)
     details = f"lines={end - start}"
