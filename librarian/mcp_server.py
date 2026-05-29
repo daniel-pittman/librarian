@@ -552,10 +552,24 @@ def librarian_remove_docs(entry_id: str, doc: str, session_label: str) -> str:
 
 
 @mcp.tool()
-def librarian_delete(entry_id: str, session_label: str, confirm: bool = False) -> str:
-    """Delete an entry. Requires confirm=True; otherwise returns a dry-run preview."""
+def librarian_delete(
+    entry_id: str,
+    session_label: str,
+    confirm: bool = False,
+    repoint_to: str | None = None,
+) -> str:
+    """Delete an entry. Requires confirm=True; otherwise returns a dry-run preview.
+
+    ``repoint_to``, if set, rewrites every backticked or plain-text reference
+    to ``entry_id`` to point at that target id before the source is removed —
+    so the delete does not leave dangling cross-references behind.
+    """
     label = _validate_label(session_label)
-    args = ["delete", entry_id] + (["--confirm"] if confirm else [])
+    args = ["delete", entry_id]
+    if repoint_to:
+        args += ["--repoint-to", repoint_to]
+    if confirm:
+        args.append("--confirm")
     return _out(_run_cli(args, extra_env={"LIBRARIAN_SESSION_LABEL": label}))
 
 

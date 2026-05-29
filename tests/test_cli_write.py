@@ -1516,6 +1516,177 @@ def test_delete_unknown(sandbox):
 
 
 # ---------------------------------------------------------------------------
+# delete --repoint-to (rewrite inbound references before deleting)
+# ---------------------------------------------------------------------------
+
+
+def test_delete_repoint_to_rewrites_inbound_refs_and_deletes_source(sandbox):
+    """delete --repoint-to <t> rewrites every reference to the source -> t,
+    then removes the source entry."""
+    # 2024-06-security-curriculum-report references 2024-03-intro-security-course
+    # by backtick in its description.
+    out, _, rc = sandbox.run(
+        "delete",
+        "2024-03-intro-security-course",
+        "--repoint-to",
+        "2026-04-self-study",
+        "--confirm",
+    )
+    assert rc == 0
+    assert "repointed" in out.lower()
+    # Source is gone.
+    ids = {e["id"] for e in sandbox.load_activities()}
+    assert "2024-03-intro-security-course" not in ids
+    # The referrer now points at the target.
+    desc = sandbox.entry("2024-06-security-curriculum-report")["description"]
+    assert "`2026-04-self-study`" in desc
+    assert "2024-03-intro-security-course" not in desc
+
+
+def test_delete_repoint_to_dry_run_shows_count_without_writing(sandbox):
+    """Without --confirm, delete --repoint-to previews the count and writes nothing."""
+    before_count = len(sandbox.load_activities())
+    before_text = sandbox.activities.read_text()
+    out, _, rc = sandbox.run(
+        "delete",
+        "2024-03-intro-security-course",
+        "--repoint-to",
+        "2026-04-self-study",
+    )
+    assert rc == 0
+    assert "Would repoint" in out
+    assert "Dry run" in out
+    assert len(sandbox.load_activities()) == before_count
+    assert sandbox.activities.read_text() == before_text
+
+
+def test_delete_repoint_to_unknown_target_rejected(sandbox):
+    """delete --repoint-to <unknown-id> fails before any write."""
+    before = sandbox.activities.read_text()
+    out, _, rc = sandbox.run(
+        "delete",
+        "2026-04-self-study",
+        "--repoint-to",
+        "no-such-target",
+        "--confirm",
+    )
+    assert rc == 1
+    assert "not found" in out.lower()
+    assert sandbox.activities.read_text() == before
+
+
+def test_delete_repoint_to_rejects_self_target(sandbox):
+    """--repoint-to cannot target the entry being deleted."""
+    before = sandbox.activities.read_text()
+    out, _, rc = sandbox.run(
+        "delete",
+        "2026-04-self-study",
+        "--repoint-to",
+        "2026-04-self-study",
+        "--confirm",
+    )
+    assert rc == 1
+    assert "being deleted" in out.lower()
+    assert sandbox.activities.read_text() == before
+
+
+def test_delete_repoint_to_with_no_inbound_refs_succeeds(sandbox):
+    """An entry with no inbound refs can still be deleted with --repoint-to.
+
+    Repoint count is 0; the delete proceeds normally.
+    """
+    out, _, rc = sandbox.run(
+        "delete",
+        "2026-04-self-study",
+        "--repoint-to",
+        "2025-02-conference-talk",
+        "--confirm",
+    )
+    assert rc == 0
+    assert "0 reference(s) repointed" in out
+    ids = {e["id"] for e in sandbox.load_activities()}
+    assert "2026-04-self-study" not in ids
+
+
+def test_delete_repoint_to_respects_token_boundaries(sandbox):
+    """A longer id-shaped string starting with the source id must not be touched."""
+    sentinel = "2024-03-intro-security-course-extension"
+    sandbox.run(
+        "update-notes",
+        "2025-02-conference-talk",
+        stdin=f"See {sentinel} for an unrelated follow-on.",
+    )
+    out, _, rc = sandbox.run(
+        "delete",
+        "2024-03-intro-security-course",
+        "--repoint-to",
+        "2026-04-self-study",
+        "--confirm",
+    )
+    assert rc == 0
+    notes = sandbox.entry("2025-02-conference-talk")["ptr"]["notes"]
+    assert sentinel in notes, f"longer id-shaped string was modified: {notes!r}"
+
+
+def test_delete_repoint_to_rewrites_plain_text_refs_in_notes(sandbox):
+    """The rewrite covers plain-text mentions in block notes, not just backticks."""
+    sandbox.run(
+        "update-notes",
+        "2025-02-conference-talk",
+        stdin="Originated from 2024-03-intro-security-course coursework.",
+    )
+    out, _, rc = sandbox.run(
+        "delete",
+        "2024-03-intro-security-course",
+        "--repoint-to",
+        "2026-04-self-study",
+        "--confirm",
+    )
+    assert rc == 0
+    notes = sandbox.entry("2025-02-conference-talk")["ptr"]["notes"]
+    assert "2026-04-self-study" in notes
+    assert "2024-03-intro-security-course" not in notes
+
+
+def test_delete_without_repoint_to_leaves_refs_intact(sandbox):
+    """Existing delete behavior unchanged: without --repoint-to, refs aren't rewritten."""
+    out, _, rc = sandbox.run("delete", "2024-03-intro-security-course", "--confirm")
+    assert rc == 0
+    # The referrer still mentions the now-dangling id (this is the prior
+    # behavior the --repoint-to flag exists to remediate).
+    desc = sandbox.entry("2024-06-security-curriculum-report")["description"]
+    assert "2024-03-intro-security-course" in desc
+
+
+def test_delete_repoint_to_writes_ledger_entry_with_count(sandbox):
+    """The ledger records the repoint target and reference count."""
+    sandbox.run(
+        "delete",
+        "2024-03-intro-security-course",
+        "--repoint-to",
+        "2026-04-self-study",
+        "--confirm",
+    )
+    text = sandbox.ledger.read_text()
+    assert "delete" in text
+    assert "2024-03-intro-security-course" in text
+    assert "repoint-to=2026-04-self-study" in text
+    assert "refs=" in text
+
+
+def test_delete_help_mid_args_does_not_silently_no_op(sandbox):
+    """`delete <id> -h --confirm` must not silently exit 0 without deleting.
+
+    Same safety pattern as set-block: -h alongside other args is a hard error,
+    not a sneaky no-op that looks like success.
+    """
+    before = sandbox.activities.read_text()
+    out, _, rc = sandbox.run("delete", "2026-04-self-study", "-h", "--confirm")
+    assert rc != 0
+    assert sandbox.activities.read_text() == before
+
+
+# ---------------------------------------------------------------------------
 # rename-id
 # ---------------------------------------------------------------------------
 

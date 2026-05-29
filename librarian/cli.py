@@ -1001,6 +1001,42 @@ def _parse_bool(value: object) -> bool:
     raise ValueError(f"expected a boolean (true/false), got {value!r}")
 
 
+def _repoint_references(
+    lines: list[str],
+    old_id: str,
+    new_id: str,
+    *,
+    skip_range: tuple[int, int] | None = None,
+) -> int:
+    """Rewrite every cross-reference to ``old_id`` to point at ``new_id``.
+
+    Matches are bounded by id-character lookarounds, so a rewrite of
+    ``ongoing-coi`` leaves ``ongoing-coi-training`` untouched. Catches both
+    backticked refs and plain-text mentions in any text field (description,
+    block notes, etc.). Mutates ``lines`` in place and returns the number of
+    references rewritten.
+
+    ``skip_range``, if given, is a ``(start, end)`` half-open line slice that
+    is left untouched — used by ``delete --repoint-to`` to keep the
+    soon-to-be-deleted source entry's own lines from inflating the count and
+    confusing the dry-run preview.
+
+    Shared by ``rename-id`` and ``delete --repoint-to``, and the foundation
+    ``merge`` (the next consolidation primitive) will reuse via the same
+    helper.
+    """
+    pattern = re.compile(rf"(?<![a-z0-9-]){re.escape(old_id)}(?![a-z0-9-])")
+    repointed = 0
+    for i, line in enumerate(lines):
+        if skip_range is not None and skip_range[0] <= i < skip_range[1]:
+            continue
+        new_line, n = pattern.subn(new_id, line)
+        if n:
+            repointed += n
+            lines[i] = new_line
+    return repointed
+
+
 def _scan_list_items(
     lines: list[str], parent_idx: int, end: int
 ) -> tuple[list[tuple[int, str]], int | None, int]:
@@ -1250,28 +1286,89 @@ def _render_generic_scalar(value) -> str:
 
 
 def cmd_delete(ctx: Context, args: list[str]) -> int:
-    """Delete an entry by id. ``delete <entry-id> [--confirm]`` (dry-run default)."""
+    """Delete an entry by id.
+
+    ``delete <entry-id> [--repoint-to <target-id>] [--confirm]`` (dry-run default).
+
+    With ``--repoint-to <target-id>``, every backticked or plain-text reference
+    to ``<entry-id>`` across other entries is rewritten to point at
+    ``<target-id>`` before the source entry is removed, so a delete no longer
+    leaves dangling cross-references behind. Without it, behavior is unchanged
+    (references are left as-is for the caller to fix).
+    """
     label = _resolve_label(args, required=True)
     if label is None:
         return 1
-    if not args:
-        print("Usage: librarian delete <entry-id> --confirm")
-        return 1
-    entry_id = args[0]
-    confirm = "--confirm" in args
+    # Pre-screen -h alongside other args, matching set-block's safety pattern.
+    if ("-h" in args or "--help" in args) and len(args) > 1:
+        print("ERROR: -h/--help must be used alone (no other arguments)")
+        return 2
+    parser = argparse.ArgumentParser(prog="librarian delete")
+    parser.add_argument("entry_id")
+    parser.add_argument("--confirm", action="store_true")
+    parser.add_argument(
+        "--repoint-to",
+        dest="repoint_to",
+        help="rewrite inbound references to this id before deleting",
+    )
+    try:
+        parsed = parser.parse_args(args)
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 1
+    entry_id = parsed.entry_id
+    repoint_to = parsed.repoint_to
+
     lines = read_lines(ctx.paths.activities)
     start, end = find_entry_line_range(lines, entry_id)
     if start is None:
         print(f"ERROR: entry '{entry_id}' not found")
         return 1
+
+    # Validate --repoint-to up front so a dry-run with a bad target still errors.
+    if repoint_to is not None:
+        if repoint_to == entry_id:
+            print(f"ERROR: --repoint-to target '{repoint_to}' is the entry being deleted")
+            return 1
+        target_start, _ = find_entry_line_range(lines, repoint_to)
+        if target_start is None:
+            print(f"ERROR: --repoint-to target '{repoint_to}' not found")
+            return 1
+
+    # Count inbound references (outside the source entry's own lines), so the
+    # dry-run preview matches what the ledger will record on confirm.
+    repoint_count = 0
+    if repoint_to is not None:
+        pattern = re.compile(rf"(?<![a-z0-9-]){re.escape(entry_id)}(?![a-z0-9-])")
+        for i, line in enumerate(lines):
+            if start <= i < end:
+                continue
+            repoint_count += len(pattern.findall(line))
+
     print(f"Entry '{entry_id}' spans lines {start + 1}-{end} ({end - start} lines).")
-    if not confirm:
+    if repoint_to is not None:
+        print(f"Would repoint {repoint_count} inbound reference(s) to '{repoint_to}'.")
+    if not parsed.confirm:
         print("\nDry run — pass --confirm to actually delete.")
         return 0
+
+    # Repoint inbound references first (skipping the soon-to-be-deleted source
+    # range so a self-ref in source's own description can't inflate the count),
+    # then remove the source entry's lines.
+    if repoint_to is not None:
+        _repoint_references(lines, entry_id, repoint_to, skip_range=(start, end))
     del lines[start:end]
     write_lines(ctx.paths.activities, lines)
-    append_ledger(ctx.paths.ledger, "delete", entry_id, label, details=f"lines={end - start}")
-    print(f"Deleted entry '{entry_id}' ({end - start} lines removed)")
+    details = f"lines={end - start}"
+    if repoint_to is not None:
+        details += f" repoint-to={repoint_to} refs={repoint_count}"
+    append_ledger(ctx.paths.ledger, "delete", entry_id, label, details=details)
+    if repoint_to is not None:
+        print(
+            f"Deleted entry '{entry_id}' ({end - start} lines removed); "
+            f"{repoint_count} reference(s) repointed to '{repoint_to}'"
+        )
+    else:
+        print(f"Deleted entry '{entry_id}' ({end - start} lines removed)")
     return 0
 
 
@@ -1997,17 +2094,10 @@ def cmd_rename_id(ctx: Context, args: list[str]) -> int:
     indent = " " * line_indent(lines[start])
     lines[start] = f"{indent}- id: {new_id}\n"
 
-    # Repoint every cross-reference to the old id, bounded by id-character
-    # lookarounds. This catches both backticked refs (``old-id``) and plain-
-    # text mentions in prose, while leaving longer id-shaped strings that
-    # happen to start with the old id untouched.
-    pattern = re.compile(rf"(?<![a-z0-9-]){re.escape(old_id)}(?![a-z0-9-])")
-    repointed = 0
-    for i, line in enumerate(lines):
-        new_line, n = pattern.subn(new_id, line)
-        if n:
-            repointed += n
-            lines[i] = new_line
+    # Repoint every cross-reference via the shared helper (also used by
+    # delete --repoint-to). The id-character lookarounds keep longer
+    # id-shaped strings that happen to start with old_id untouched.
+    repointed = _repoint_references(lines, old_id, new_id)
     write_lines(ctx.paths.activities, lines)
     append_ledger(ctx.paths.ledger, "rename-id", new_id, label, f"from={old_id} refs={repointed}")
     print(f"Renamed '{old_id}' -> '{new_id}' ({repointed} cross-reference(s) repointed)")
