@@ -1757,6 +1757,919 @@ def test_rename_id_rejects_invalid_slug(sandbox):
 
 
 # ---------------------------------------------------------------------------
+# merge (consolidate source entries into a target, atomically)
+# ---------------------------------------------------------------------------
+
+
+def _merge_target_entry(**overrides) -> dict:
+    """A ptr-only target entry to be merged into."""
+    base = {
+        "id": "2026-09-mg-target",
+        "date": "2026-09-01",
+        "title": "Merge target",
+        "description": "Original target description.",
+        "tags": ["target-tag", "shared"],
+        "docs": ["https://example.com/target"],
+        "ptr": {
+            "category": "service",
+            "subcategory": "external-professional",
+            "notes": "target ptr",
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def _merge_source_entry(**overrides) -> dict:
+    """A cpe-only source entry that can carry a block to a ptr-only target."""
+    base = {
+        "id": "2026-09-mg-source",
+        "date": "2026-09-01",
+        "title": "Merge source",
+        "description": "Source description.",
+        "tags": ["source-tag", "shared"],
+        "docs": ["https://example.com/source"],
+        "cpe": {"group": "primary", "credits": 4},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_merge_unions_tags_in_target_then_source_order(sandbox):
+    """Tag union keeps target's order and de-duplicates against shared values."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 0
+    tags = sandbox.entry("2026-09-mg-target")["tags"]
+    # Target's tags stay in their original order; source's new tag is appended;
+    # shared tag is not duplicated.
+    assert tags[:2] == ["target-tag", "shared"]
+    assert "source-tag" in tags
+    assert tags.count("shared") == 1
+
+
+def test_merge_unions_docs(sandbox):
+    """Doc union de-duplicates and appends source's new docs."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    docs = sandbox.entry("2026-09-mg-target")["docs"]
+    assert "https://example.com/target" in docs
+    assert "https://example.com/source" in docs
+
+
+def test_merge_carries_block_target_lacks(sandbox):
+    """A source's block that target lacks is carried over and round-trips."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))  # ptr only
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))  # cpe only
+    sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    target = sandbox.entry("2026-09-mg-target")
+    # cpe carried over.
+    assert target["cpe"]["group"] == "primary"
+    assert target["cpe"]["credits"] == 4
+    # Target's ptr untouched.
+    assert target["ptr"]["notes"] == "target ptr"
+
+
+def test_merge_same_block_conflict_aborts_by_default(sandbox):
+    """Default --on-block-conflict=abort refuses to merge when both have the block."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    source = _merge_source_entry(
+        ptr={"category": "scholarly", "subcategory": "cat3-other", "notes": "src ptr"}
+    )
+    source.pop("cpe", None)
+    sandbox.run("create", stdin=json.dumps(source))
+    before = sandbox.activities.read_text()
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 1
+    assert "conflict" in out.lower()
+    assert "--on-block-conflict" in out
+    # No partial write.
+    assert sandbox.activities.read_text() == before
+
+
+def test_merge_keep_target_drops_source_block(sandbox):
+    """--on-block-conflict=keep-target retains target's block; source's is dropped."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    source = _merge_source_entry(
+        ptr={"category": "scholarly", "subcategory": "cat3-other", "notes": "src ptr"}
+    )
+    source.pop("cpe", None)
+    sandbox.run("create", stdin=json.dumps(source))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--on-block-conflict",
+        "keep-target",
+        "--confirm",
+    )
+    assert rc == 0
+    target = sandbox.entry("2026-09-mg-target")
+    # Target's ptr survives untouched.
+    assert target["ptr"]["notes"] == "target ptr"
+    assert target["ptr"]["category"] == "service"
+
+
+def test_merge_keep_source_replaces_target_block(sandbox):
+    """--on-block-conflict=keep-source replaces target's block with the source's."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    source = _merge_source_entry(
+        ptr={"category": "scholarly", "subcategory": "cat3-other", "notes": "src ptr"}
+    )
+    source.pop("cpe", None)
+    sandbox.run("create", stdin=json.dumps(source))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--on-block-conflict",
+        "keep-source",
+        "--confirm",
+    )
+    assert rc == 0
+    target = sandbox.entry("2026-09-mg-target")
+    # Target's ptr is now source's ptr.
+    assert target["ptr"]["category"] == "scholarly"
+    assert target["ptr"]["notes"] == "src ptr"
+
+
+def test_merge_validates_carried_block_against_schema(sandbox):
+    """A carried-over block must satisfy schema validation before any write."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    # Construct a source whose cpe block is missing a required field. The
+    # source file has to bypass create's own validation - hand-edit the YAML
+    # to simulate a manually-corrupted source.
+    source = _merge_source_entry()
+    sandbox.run("create", stdin=json.dumps(source))
+    text = sandbox.activities.read_text()
+    # Replace the source's `credits: 4` line with `credits: null`.
+    sandbox.activities.write_text(text.replace("credits: 4", "credits: null"))
+    before = sandbox.activities.read_text()
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 1
+    assert "fails schema validation" in out.lower()
+    assert sandbox.activities.read_text() == before
+
+
+def test_merge_repoints_inbound_references(sandbox):
+    """References to source ids across other entries are repointed to target."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    # Inject a referrer that mentions the source in both backtick and plain text.
+    sandbox.run(
+        "update-notes",
+        "2024-03-intro-security-course",
+        stdin="See `2026-09-mg-source` and 2026-09-mg-source.",
+    )
+    sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    notes = sandbox.entry("2024-03-intro-security-course")["ptr"]["notes"]
+    assert "2026-09-mg-target" in notes
+    assert "2026-09-mg-source" not in notes
+
+
+def test_merge_repointing_respects_token_boundaries(sandbox):
+    """A longer id-shaped string starting with the source id must not be repointed."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    sentinel = "2026-09-mg-source-extension"
+    sandbox.run(
+        "update-notes",
+        "2024-03-intro-security-course",
+        stdin=f"See {sentinel} for an unrelated follow-on.",
+    )
+    sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    notes = sandbox.entry("2024-03-intro-security-course")["ptr"]["notes"]
+    assert sentinel in notes
+
+
+def test_merge_provenance_note_is_plain_text_not_backticked(sandbox):
+    """The provenance note must use plain text so validate's dangling-ref
+    scanner doesn't flag the now-deleted source ids as broken refs."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    desc = sandbox.entry("2026-09-mg-target")["description"]
+    assert "Consolidates former entries: 2026-09-mg-source" in desc
+    # MUST be plain text — backticks would trip the dangling-ref scanner.
+    assert "`2026-09-mg-source`" not in desc
+    # validate now runs clean (the consolidates ids are plain prose, not refs).
+    out, _, _ = sandbox.run("validate")
+    assert "DANGLING REF: 2026-09-mg-target" not in out
+
+
+def test_merge_no_provenance_suppresses_note(sandbox):
+    """--no-provenance keeps the target's description unchanged."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--no-provenance",
+        "--confirm",
+    )
+    desc = sandbox.entry("2026-09-mg-target")["description"]
+    assert "Consolidates former entries" not in desc
+
+
+def test_merge_deletes_source_entries(sandbox):
+    """All sources are removed after the merge succeeds."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    ids = {e["id"] for e in sandbox.load_activities()}
+    assert "2026-09-mg-source" not in ids
+    assert "2026-09-mg-target" in ids
+
+
+def test_merge_with_multiple_sources_deletes_all_cleanly(sandbox):
+    """Multiple sources delete cleanly (no index drift between deletions)."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry(id="2026-09-mg-s1")))
+    sandbox.run(
+        "create",
+        stdin=json.dumps(
+            {
+                "id": "2026-09-mg-s2",
+                "date": "2026-09-01",
+                "title": "S2",
+                "description": "d",
+                "tags": ["s2-tag"],
+                "docs": [],
+                "ptr": {
+                    "category": "scholarly",
+                    "subcategory": "cat3-other",
+                    "notes": "s2 ptr",
+                },
+            }
+        ),
+    )
+    sandbox.run(
+        "merge",
+        "2026-09-mg-s1",
+        "2026-09-mg-s2",
+        "--into",
+        "2026-09-mg-target",
+        "--on-block-conflict",
+        "keep-target",
+        "--confirm",
+    )
+    ids = {e["id"] for e in sandbox.load_activities()}
+    assert "2026-09-mg-s1" not in ids
+    assert "2026-09-mg-s2" not in ids
+    assert "2026-09-mg-target" in ids
+
+
+def test_merge_dry_run_shows_source_descriptions_and_writes_nothing(sandbox):
+    """Without --confirm, the dry-run prints source descriptions for manual folding."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    before = sandbox.activities.read_text()
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+    )
+    assert rc == 0
+    assert "Dry run" in out
+    assert "Source description" in out  # the surfaced description for folding
+    assert sandbox.activities.read_text() == before
+
+
+def test_merge_skips_self_source(sandbox):
+    """Listing the target as a source is silently skipped."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "2026-09-mg-target",  # self-source
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 0
+    # Target survives and the legitimate source was still merged.
+    assert sandbox.entry("2026-09-mg-target") is not None
+    assert "2026-09-mg-source" not in {e["id"] for e in sandbox.load_activities()}
+
+
+def test_merge_dedups_repeated_source_ids(sandbox):
+    """Duplicate source ids in argv collapse to a single source."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 0
+    # The single source was processed; ledger should reflect one source.
+    text = sandbox.ledger.read_text()
+    assert "sources=2026-09-mg-source " in text
+
+
+def test_merge_unknown_target_rejected(sandbox):
+    """An unknown target id is a hard error without any write."""
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    after_create = sandbox.activities.read_text()
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "no-such-target",
+        "--confirm",
+    )
+    assert rc == 1
+    assert "target" in out.lower() and "not found" in out.lower()
+    assert sandbox.activities.read_text() == after_create
+
+
+def test_merge_unknown_source_rejected(sandbox):
+    """An unknown source id is a hard error without any write."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    before = sandbox.activities.read_text()
+    out, _, rc = sandbox.run(
+        "merge",
+        "no-such-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 1
+    assert "not found" in out.lower()
+    assert sandbox.activities.read_text() == before
+
+
+def test_merge_ledger_records_aggregate(sandbox):
+    """One merge ledger entry summarizes the whole transaction."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    text = sandbox.ledger.read_text()
+    assert "merge 2026-09-mg-target" in text
+    assert "sources=2026-09-mg-source" in text
+    assert "blocks=carried:cpe" in text
+    assert "refs=" in text
+
+
+def test_merge_help_mid_args_does_not_silently_no_op(sandbox):
+    """`merge ... -h ... --confirm` must not silently exit 0 without merging.
+
+    Same safety pattern as set-block and delete: -h alongside other args is
+    a hard error, not a sneaky no-op.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    before = sandbox.activities.read_text()
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "-h",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc != 0
+    assert sandbox.activities.read_text() == before
+
+
+def test_merge_docs_union_does_not_corrupt_inline_target(sandbox):
+    """When target's docs field is inline `[...]`, the union must stay valid YAML.
+
+    Round-1 review finding: the prior path's `else` branch spliced new items
+    as block-style children under an inline list, producing invalid YAML.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    # Hand-edit target's docs to the inline non-empty shape.
+    text = sandbox.activities.read_text()
+    needle = "    docs:\n      - 'https://example.com/target'\n"
+    replacement = "    docs: ['https://example.com/target']\n"
+    assert needle in text, "fixture format changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, replacement, 1))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 0
+    # The post-merge file must still parse cleanly.
+    docs = sandbox.entry("2026-09-mg-target")["docs"]
+    assert "https://example.com/target" in docs
+    assert "https://example.com/source" in docs
+
+
+def test_merge_carries_generic_block_target_lacks(sandbox):
+    """A source's generic (schema-unknown) block must be carried over, not
+    silently dropped.
+
+    Round-1 review finding #2: the block-plan loop only iterated
+    ctx.schema.blocks, so a source with a generic block had it silently
+    discarded along with the source entry.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    source = _merge_source_entry(id="2026-09-mg-gsrc")
+    # Append a generic block via JSON; cmd_create's _render_entry supports it.
+    source["custom_block"] = {"key1": "value1", "key2": 42}
+    sandbox.run("create", stdin=json.dumps(source))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-gsrc",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 0
+    target = sandbox.entry("2026-09-mg-target")
+    assert "custom_block" in target
+    assert target["custom_block"]["key1"] == "value1"
+    assert target["custom_block"]["key2"] == 42
+
+
+def test_merge_provenance_hard_fails_when_target_has_no_description(sandbox):
+    """If the target lacks a description, the default-on provenance step must
+    not silently no-op while the sources get deleted anyway.
+
+    Round-1 review finding #3.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    # Hand-edit out the target's description field entirely (artificial state,
+    # but the merge code must refuse rather than silently lose the audit note).
+    text = sandbox.activities.read_text()
+    # Replace the literal-block description (two lines: header + indented body)
+    # with nothing for the target entry only.
+    anchor = text.index("- id: 2026-09-mg-target")
+    chunk = text[anchor:]
+    no_desc = chunk.replace("    description: |\n      Original target description.\n", "", 1)
+    sandbox.activities.write_text(text[:anchor] + no_desc)
+    before = sandbox.activities.read_text()
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 1
+    assert "no description" in out.lower() or "--no-provenance" in out
+    # No partial write: source was not deleted.
+    assert sandbox.activities.read_text() == before
+
+
+def test_merge_no_provenance_succeeds_when_target_lacks_description(sandbox):
+    """With --no-provenance, the missing-description case must succeed."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    text = sandbox.activities.read_text()
+    anchor = text.index("- id: 2026-09-mg-target")
+    chunk = text[anchor:]
+    no_desc = chunk.replace("    description: |\n      Original target description.\n", "", 1)
+    sandbox.activities.write_text(text[:anchor] + no_desc)
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--no-provenance",
+        "--confirm",
+    )
+    assert rc == 0
+
+
+def test_merge_refuses_inline_scalar_description(sandbox):
+    """An inline scalar description (`description: hello`) must be refused
+    with --no-provenance suggested, not silently polluted.
+
+    Round-1 review finding #4.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    text = sandbox.activities.read_text()
+    # Replace target's literal-block description with an inline scalar.
+    inline = text.replace(
+        "    description: |\n      Original target description.\n",
+        "    description: hello inline\n",
+        1,
+    )
+    sandbox.activities.write_text(inline)
+    before = sandbox.activities.read_text()
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 1
+    assert "inline description" in out.lower()
+    assert sandbox.activities.read_text() == before
+
+
+def test_merge_inline_scalar_description_ok_with_no_provenance(sandbox):
+    """--no-provenance bypasses the inline-description check."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    text = sandbox.activities.read_text()
+    inline = text.replace(
+        "    description: |\n      Original target description.\n",
+        "    description: hello inline\n",
+        1,
+    )
+    sandbox.activities.write_text(inline)
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--no-provenance",
+        "--confirm",
+    )
+    assert rc == 0
+
+
+def test_merge_carried_block_refs_to_other_source_are_rewritten(sandbox):
+    """A carried block's mention of another source being deleted in the same
+    merge must be rewritten to the target before the source is removed —
+    otherwise the docstring's no-dangling-refs promise breaks.
+
+    Round-2 review finding #1. Source A's cpe.notes mentions source B; when
+    both are merged into target, A's cpe is carried over (target lacks cpe),
+    so the B-mention rides along verbatim. The merge must rewrite that
+    mention to target_id BEFORE step 6 deletes B, leaving validate clean.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    src_a = _merge_source_entry(id="2026-09-mg-src-a")
+    src_a["cpe"]["notes"] = "Related to `2026-09-mg-src-b`."
+    sandbox.run("create", stdin=json.dumps(src_a))
+    src_b = {
+        "id": "2026-09-mg-src-b",
+        "date": "2026-09-01",
+        "title": "B",
+        "description": "B desc.",
+        "tags": ["btag"],
+        "docs": [],
+        "ptr": {
+            "category": "scholarly",
+            "subcategory": "cat3-other",
+            "notes": "b ptr",
+        },
+    }
+    sandbox.run("create", stdin=json.dumps(src_b))
+    sandbox.run(
+        "merge",
+        "2026-09-mg-src-a",
+        "2026-09-mg-src-b",
+        "--into",
+        "2026-09-mg-target",
+        "--on-block-conflict",
+        "keep-target",
+        "--confirm",
+    )
+    # The carried cpe.notes must now reference target_id, not the deleted
+    # source-b id. validate must report no dangling refs from target.
+    target = sandbox.entry("2026-09-mg-target")
+    assert "2026-09-mg-src-b" not in target["cpe"]["notes"]
+    assert "2026-09-mg-target" in target["cpe"]["notes"]
+    out, _, _ = sandbox.run("validate")
+    assert "DANGLING REF: 2026-09-mg-target" not in out
+
+
+def test_merge_ledger_records_carried_replaced_dropped_distinctions(sandbox):
+    """The ledger details distinguish carried / replaced / dropped block paths.
+
+    Round-1 review finding #6.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    # Source has cpe (carry-over candidate) and a conflicting ptr.
+    src = _merge_source_entry()
+    src["ptr"] = {
+        "category": "scholarly",
+        "subcategory": "cat3-other",
+        "notes": "src ptr",
+    }
+    sandbox.run("create", stdin=json.dumps(src))
+    sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--on-block-conflict",
+        "keep-source",  # replaces target's ptr
+        "--confirm",
+    )
+    text = sandbox.ledger.read_text()
+    # cpe was carried; ptr was replaced.
+    assert "carried:cpe" in text
+    assert "replaced:ptr" in text
+
+
+def test_merge_surfaces_first_wins_dropped_duplicate_source_blocks(sandbox):
+    """When two sources carry the same block target lacks, the second's drop
+    must surface in the dry-run plan output.
+
+    Round-1 review finding #5.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry(id="2026-09-mg-s1")))
+    sandbox.run(
+        "create",
+        stdin=json.dumps(
+            _merge_source_entry(id="2026-09-mg-s2", cpe={"group": "general", "credits": 9})
+        ),
+    )
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-s1",
+        "2026-09-mg-s2",
+        "--into",
+        "2026-09-mg-target",
+    )
+    assert rc == 0
+    assert "first source wins" in out.lower()
+    assert "2026-09-mg-s2" in out  # the dropped duplicate is named
+
+
+def test_merge_splice_block_helper_handles_unknown_block_name(sandbox):
+    """_splice_block_into_entry must not raise a misleading ValueError when
+    the block name isn't in schema_block_names.
+
+    Round-1 review finding #7. We exercise this indirectly through the
+    generic-block carry-over path (which exists now that #2 is fixed).
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    source = _merge_source_entry(id="2026-09-mg-unk")
+    source["unknown_block"] = {"a": 1, "b": "two"}
+    sandbox.run("create", stdin=json.dumps(source))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-unk",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 0
+    # The unknown block landed cleanly — no misleading "'foo' is not in list" error.
+    assert "is not in list" not in out
+    target = sandbox.entry("2026-09-mg-target")
+    assert target["unknown_block"]["a"] == 1
+
+
+def test_merge_refuses_source_with_non_dict_top_level_keys(sandbox):
+    """A source carrying a non-core, non-block top-level key whose value is
+    a list or scalar must abort the merge, naming the keys.
+
+    Round-2 review finding #3 — round-1 #2 only fixed dict values. cmd_create
+    itself drops non-dict top-level keys silently, so the test simulates a
+    hand-edited / imported source (which the README explicitly supports) by
+    injecting the field directly into the YAML.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry(id="2026-09-mg-listy")))
+    # Hand-edit a flush-aligned `custom_list: [one, two]` into the source.
+    text = sandbox.activities.read_text()
+    needle = "    cpe:\n      group: 'primary'\n"
+    assert needle in text, "fixture shape changed; update this test"
+    text2 = text.replace(needle, "    custom_list: [one, two, three]\n" + needle, 1)
+    sandbox.activities.write_text(text2)
+    before = sandbox.activities.read_text()
+    out, _, rc = sandbox.run(
+        "merge", "2026-09-mg-listy", "--into", "2026-09-mg-target", "--confirm"
+    )
+    assert rc == 1
+    assert "custom_list" in out
+    assert "non-block" in out.lower() or "cannot safely carry" in out.lower()
+    assert sandbox.activities.read_text() == before
+
+
+def test_merge_inline_docs_with_internal_quote_and_comma_round_trip(sandbox):
+    """Doc URLs containing `,` round-trip safely through the inline rewriter.
+
+    Round-2 review finding #6 (split(",") + repr() corruption case).
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    src = _merge_source_entry(docs=["https://example.com/q?a=1,b=2"])
+    sandbox.run("create", stdin=json.dumps(src))
+    # Force target's docs to inline non-empty so the inline rewriter runs.
+    text = sandbox.activities.read_text()
+    needle = "    docs:\n      - 'https://example.com/target'\n"
+    replacement = "    docs: ['https://example.com/target']\n"
+    assert needle in text, "fixture format changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, replacement, 1))
+    out, _, rc = sandbox.run(
+        "merge", "2026-09-mg-source", "--into", "2026-09-mg-target", "--confirm"
+    )
+    assert rc == 0
+    # The URL with the embedded comma must survive intact (not split into two).
+    docs = sandbox.entry("2026-09-mg-target")["docs"]
+    assert "https://example.com/q?a=1,b=2" in docs
+
+
+def test_merge_docs_empty_reset_branch_quotes_doc_with_double_quote(sandbox):
+    """The `docs: []` reset branch must yaml-quote items, not naively
+    interpolate `"{doc}"` (round-2 finding #5).
+
+    A doc value containing a `"` character would otherwise close the YAML
+    scalar prematurely and corrupt the file.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry(docs=[])))
+    src = _merge_source_entry(docs=['say "hi" world'])
+    sandbox.run("create", stdin=json.dumps(src))
+    out, _, rc = sandbox.run(
+        "merge", "2026-09-mg-source", "--into", "2026-09-mg-target", "--confirm"
+    )
+    assert rc == 0
+    # File must still parse, and the doc string must round-trip intact.
+    docs = sandbox.entry("2026-09-mg-target")["docs"]
+    assert 'say "hi" world' in docs
+
+
+def test_merge_provenance_body_indent_matches_existing_body(sandbox):
+    """Provenance note must align with the description's actual body indent,
+    not assume desc_indent + 2.
+
+    Round-2 review finding #2. Hand-edit target's literal block so its body
+    lives at desc_indent + 4 (an explicit `|4` indent), then verify the
+    provenance line sits at the same indent — otherwise YAML would terminate
+    the literal block early and the note would become a stray mapping key.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    text = sandbox.activities.read_text()
+    deep_indented = text.replace(
+        "    description: |\n      Original target description.\n",
+        "    description: |4\n        Original target description.\n",
+        1,
+    )
+    sandbox.activities.write_text(deep_indented)
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 0
+    # The whole file must still parse and the provenance line must live
+    # inside the description body (not as a stray top-level mapping key).
+    target = sandbox.entry("2026-09-mg-target")
+    assert "Consolidates former entries" in target["description"]
+    # No stray top-level key got introduced.
+    assert "Consolidates former entries" not in target
+
+
+def test_merge_empty_description_gets_clearer_error(sandbox):
+    """The empty-description case should not be labeled 'inline scalar'.
+
+    Round-2 review finding #10.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    text = sandbox.activities.read_text()
+    # Hand-edit target's description to empty value (header present, no body).
+    text2 = text.replace(
+        "    description: |\n      Original target description.\n",
+        "    description:\n",
+        1,
+    )
+    sandbox.activities.write_text(text2)
+    out, _, rc = sandbox.run(
+        "merge", "2026-09-mg-source", "--into", "2026-09-mg-target", "--confirm"
+    )
+    assert rc == 1
+    assert "empty description" in out.lower()
+
+
+def test_merge_dry_run_flag_works_as_alias(sandbox):
+    """--dry-run is accepted (README documents it) and overrides --confirm."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    before = sandbox.activities.read_text()
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--dry-run",
+        "--confirm",  # dry-run wins over confirm
+    )
+    assert rc == 0
+    assert "Dry run" in out
+    assert sandbox.activities.read_text() == before
+
+
+def test_merge_keep_source_deletes_full_block_through_comment(sandbox):
+    """A hand-edited block with a flush-left comment inside must still be
+    fully deleted (not partially) when keep-source replaces it.
+
+    Round-2 review finding #7.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    src = _merge_source_entry()
+    src["ptr"] = {
+        "category": "scholarly",
+        "subcategory": "cat3-other",
+        "notes": "src ptr",
+    }
+    sandbox.run("create", stdin=json.dumps(src))
+    # Inject a flush-left `# ...` comment line inside target's ptr block.
+    text = sandbox.activities.read_text()
+    inject_at = "      notes: 'target ptr'\n"
+    # The comment lives at column 0 (less indent than the block header),
+    # which the old terminator scan would mistake for the block's end.
+    text2 = text.replace(inject_at, inject_at + "# stray comment inside the block\n", 1)
+    sandbox.activities.write_text(text2)
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--on-block-conflict",
+        "keep-source",
+        "--confirm",
+    )
+    assert rc == 0
+    # Target's ptr is the source's now; no remnants of target's prior ptr.
+    target = sandbox.entry("2026-09-mg-target")
+    assert target["ptr"]["category"] == "scholarly"
+    assert target["ptr"]["notes"] == "src ptr"
+    # File parses cleanly (no double-block headers from a partial deletion).
+    assert isinstance(target["ptr"], dict)
+
+
+# ---------------------------------------------------------------------------
 # ledger
 # ---------------------------------------------------------------------------
 

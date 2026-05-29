@@ -108,6 +108,13 @@ by a **pluggable schema** you choose. It ships as:
   ids aren't matched as substrings. `delete <id> --repoint-to <target>` reuses
   the same rewriter, so deleting an entry can rewrite its inbound references
   to a successor in the same call instead of leaving dangling links behind.
+- **Atomic consolidation** — `merge <source-id>... --into <target-id>` folds
+  tags, docs, and missing schema blocks from one or more source entries into
+  a target, repoints every inbound reference, and deletes the sources, all in
+  one locked write. `--on-block-conflict=abort|keep-target|keep-source` chooses
+  how to resolve same-block collisions; `--dry-run` (the default without
+  `--confirm`) prints the full plan plus source descriptions so the caller can
+  fold the prose in by hand via `update-description`.
 - **Tag normalization** — `tag-audit` flags case and separator variants of the
   same tag (e.g. `Build-A-Bot` vs `build-a-bot`) so they don't fragment your
   index over time.
@@ -378,7 +385,7 @@ default.
 
 **Write:** `create`, `update-field`, `update-description`, `update-notes`,
 `update-nested-field`, `set-block`, `add-tags`, `remove-tags`, `add-docs`,
-`remove-docs`, `delete`, `rename-id`
+`remove-docs`, `delete`, `rename-id`, `merge`
 
 **File inventory:** `file-add`, `file-list`, `file-get`, `file-move`,
 `file-update`, `file-rehash`, `file-search`

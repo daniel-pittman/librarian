@@ -585,6 +585,41 @@ def librarian_rename_id(old_id: str, new_id: str, session_label: str) -> str:
     )
 
 
+@mcp.tool()
+def librarian_merge(
+    source_ids: list[str],
+    target_id: str,
+    session_label: str,
+    confirm: bool = False,
+    on_block_conflict: str = "abort",
+    with_provenance: bool = True,
+) -> str:
+    """Merge one or more source entries into a target, atomically.
+
+    Tags and docs are unioned onto the target (de-duplicated, order-stable).
+    Schema blocks the target lacks are carried over from sources; same-block
+    conflicts respect ``on_block_conflict`` (``abort`` / ``keep-target`` /
+    ``keep-source``; default ``abort``). Every backticked or plain-text
+    reference to each source id is repointed to the target before the source
+    entries are deleted, so the merge does not leave dangling cross-references.
+
+    The target's description is kept as-is. Source descriptions are returned
+    in the dry-run output for the caller to fold into the target manually via
+    ``librarian_update_description`` (description merging is editorial, not
+    mechanical). Set ``confirm=True`` to actually execute; otherwise the call
+    returns the dry-run plan.
+    """
+    label = _validate_label(session_label)
+    args = ["merge", *source_ids, "--into", target_id]
+    if on_block_conflict and on_block_conflict != "abort":
+        args += ["--on-block-conflict", on_block_conflict]
+    if not with_provenance:
+        args.append("--no-provenance")
+    if confirm:
+        args.append("--confirm")
+    return _out(_run_cli(args, extra_env={"LIBRARIAN_SESSION_LABEL": label}))
+
+
 # =============================================================================
 # File-inventory tools
 # =============================================================================
