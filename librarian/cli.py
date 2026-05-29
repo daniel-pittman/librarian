@@ -952,7 +952,13 @@ def _find_entry_field_line(lines: list[str], start: int, end: int, field: str) -
     """
     expected_indent = line_indent(lines[start]) + 2
     for i in range(start, end):
-        if line_indent(lines[i]) == expected_indent and lines[i].strip().startswith(f"{field}:"):
+        if line_indent(lines[i]) != expected_indent:
+            continue
+        stripped = lines[i].lstrip()
+        # Recognize both `field:` and `field :` (space-before-colon). The
+        # latter is tolerated by find_entry_line_range, so a hand-edited
+        # entry can reach the duplicate-block guard with that form.
+        if stripped.startswith(f"{field}:") or stripped.startswith(f"{field} :"):
             return i
     return None
 
@@ -1532,12 +1538,14 @@ def cmd_update_nested_field(ctx: Context, args: list[str]) -> int:
         return 1
 
     # Validate the new value in the context of the entry's current block data,
-    # so dependent enums resolve against the live parent value.
+    # so dependent enums resolve against the live parent value. Filter by the
+    # precise `BLOCK.FIELD:` label rather than a bare substring so issues
+    # about unrelated sibling fields don't leak into this update's error path
+    # (a substring like "CATEGORY" would otherwise match "PTR.SUBCATEGORY:").
     block_data = dict(entry.get(block_name) or {})
     block_data[field_name] = coerced
-    issues = [
-        issue for issue in validate_block(block_def, block_data) if field_name.upper() in issue
-    ]
+    label_prefix = f"{block_name.upper()}.{field_name.upper()}:"
+    issues = [issue for issue in validate_block(block_def, block_data) if label_prefix in issue]
     if issues:
         for issue in issues:
             print(f"ERROR: {issue}")
@@ -1608,6 +1616,14 @@ def cmd_set_block(ctx: Context, args: list[str]) -> int:
     if label is None:
         return 1
 
+    # Reject `-h`/`--help` mixed with positional/`--json` args. argparse
+    # short-circuits on help anywhere in argv and exits 0, which would
+    # otherwise turn `set-block <id> <block> -h ...` into a silent no-op
+    # that returns success without performing the write.
+    if ("-h" in args or "--help" in args) and len(args) > 1:
+        print("ERROR: -h/--help must be used alone (no other arguments)")
+        return 2
+
     # Accept JSON via --json or stdin (matching cmd_create) so a CLI user can
     # supply whitespace-sensitive content without losing it to argv joining.
     parser = argparse.ArgumentParser(prog="librarian set-block")
@@ -1618,7 +1634,8 @@ def cmd_set_block(ctx: Context, args: list[str]) -> int:
         parsed = parser.parse_args(args)
     except SystemExit as exc:
         # argparse exits 0 for --help and 2 for a usage error; preserve that
-        # so `set-block -h` returns 0 instead of looking like a failure.
+        # so `set-block -h` (used alone) returns 0 instead of looking like
+        # a failure.
         return int(exc.code) if isinstance(exc.code, int) else 1
     entry_id, block_name = parsed.entry_id, parsed.block
 
@@ -1665,10 +1682,12 @@ def cmd_set_block(ctx: Context, args: list[str]) -> int:
         print(f"ERROR: entry '{entry_id}' not found")
         return 1
 
-    # Existence check BEFORE every form of value validation: a user who runs
-    # set-block on an entry that already has the block gets the actionable
-    # error, not a report (from newline / coerce / validate) that turns out
-    # to be moot.
+    # Existence check BEFORE value-level validation (newline / coerce /
+    # validate_block) so a user who hits set-block on an entry that already
+    # has the block gets the actionable error rather than a value report
+    # that turns out to be moot. Structural-input errors (bad JSON, unknown
+    # fields, empty payload) still fire first, since those have to be sorted
+    # out before existence even matters.
     if _find_entry_field_line(lines, start, end, block_name) is not None:
         print(
             f"ERROR: block '{block_name}' already present on entry '{entry_id}'. "

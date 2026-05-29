@@ -943,6 +943,60 @@ def test_set_block_newline_check_runs_after_existence(sandbox):
     assert "newline" not in out.lower()
 
 
+def test_set_block_help_mid_write_does_not_silently_no_op(sandbox):
+    """`set-block <id> <block> -h ...` must not silently exit 0 without writing.
+
+    argparse processes -h anywhere in argv and exits 0; a permissive handler
+    would dutifully return 0 and the user's wrapper script would think the
+    write succeeded. Pre-screen so `-h` mixed with other args is a hard error.
+    """
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "-h",
+        "--json",
+        json.dumps({"group": "primary", "credits": 1}),
+    )
+    assert rc != 0
+    assert "alone" in out.lower() or "help" in out.lower()
+    # The write must NOT have happened.
+    assert "cpe" not in sandbox.entry("2026-09-sb-target")
+
+
+def test_set_block_detects_block_with_space_before_colon(sandbox):
+    """A hand-edited entry with `ptr :` (space before colon) must still trip
+    the duplicate-block guard.
+
+    `find_entry_line_range` accepts both `- id:` and `- id :` forms, so the
+    duplicate-block helper has to match that tolerance. Otherwise set-block
+    would happily splice a second block of the same name into the entry,
+    silently losing or invalidating the first.
+    """
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    # Hand-edit the entry so its ptr block-key has a stray space before the
+    # colon — the same shape `find_entry_line_range` already tolerates. Scope
+    # to this entry by anchoring on its id marker so unrelated fixture entries
+    # are untouched.
+    text = sandbox.activities.read_text()
+    anchor = text.index("- id: 2026-09-sb-target")
+    suffix_start = anchor + text[anchor:].index("    ptr:")
+    sandbox.activities.write_text(
+        text[:suffix_start] + text[suffix_start:].replace("    ptr:", "    ptr :", 1)
+    )
+
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "ptr",
+        "--json",
+        json.dumps({"category": "service", "subcategory": "external-professional"}),
+    )
+    assert rc == 1
+    assert "already present" in out.lower()
+
+
 def test_set_block_rejects_required_fields_set_to_null(sandbox):
     """JSON null for a required field must be a hard validation error.
 
