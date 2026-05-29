@@ -2178,7 +2178,7 @@ def test_merge_ledger_records_aggregate(sandbox):
     text = sandbox.ledger.read_text()
     assert "merge 2026-09-mg-target" in text
     assert "sources=2026-09-mg-source" in text
-    assert "blocks=cpe" in text
+    assert "blocks=carried:cpe" in text
     assert "refs=" in text
 
 
@@ -2201,6 +2201,287 @@ def test_merge_help_mid_args_does_not_silently_no_op(sandbox):
     )
     assert rc != 0
     assert sandbox.activities.read_text() == before
+
+
+def test_merge_docs_union_does_not_corrupt_inline_target(sandbox):
+    """When target's docs field is inline `[...]`, the union must stay valid YAML.
+
+    Round-1 review finding: the prior path's `else` branch spliced new items
+    as block-style children under an inline list, producing invalid YAML.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    # Hand-edit target's docs to the inline non-empty shape.
+    text = sandbox.activities.read_text()
+    needle = "    docs:\n      - 'https://example.com/target'\n"
+    replacement = "    docs: ['https://example.com/target']\n"
+    assert needle in text, "fixture format changed; update this test"
+    sandbox.activities.write_text(text.replace(needle, replacement, 1))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 0
+    # The post-merge file must still parse cleanly.
+    docs = sandbox.entry("2026-09-mg-target")["docs"]
+    assert "https://example.com/target" in docs
+    assert "https://example.com/source" in docs
+
+
+def test_merge_carries_generic_block_target_lacks(sandbox):
+    """A source's generic (schema-unknown) block must be carried over, not
+    silently dropped.
+
+    Round-1 review finding #2: the block-plan loop only iterated
+    ctx.schema.blocks, so a source with a generic block had it silently
+    discarded along with the source entry.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    source = _merge_source_entry(id="2026-09-mg-gsrc")
+    # Append a generic block via JSON; cmd_create's _render_entry supports it.
+    source["custom_block"] = {"key1": "value1", "key2": 42}
+    sandbox.run("create", stdin=json.dumps(source))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-gsrc",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 0
+    target = sandbox.entry("2026-09-mg-target")
+    assert "custom_block" in target
+    assert target["custom_block"]["key1"] == "value1"
+    assert target["custom_block"]["key2"] == 42
+
+
+def test_merge_provenance_hard_fails_when_target_has_no_description(sandbox):
+    """If the target lacks a description, the default-on provenance step must
+    not silently no-op while the sources get deleted anyway.
+
+    Round-1 review finding #3.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    # Hand-edit out the target's description field entirely (artificial state,
+    # but the merge code must refuse rather than silently lose the audit note).
+    text = sandbox.activities.read_text()
+    # Replace the literal-block description (two lines: header + indented body)
+    # with nothing for the target entry only.
+    anchor = text.index("- id: 2026-09-mg-target")
+    chunk = text[anchor:]
+    no_desc = chunk.replace("    description: |\n      Original target description.\n", "", 1)
+    sandbox.activities.write_text(text[:anchor] + no_desc)
+    before = sandbox.activities.read_text()
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 1
+    assert "no description" in out.lower() or "--no-provenance" in out
+    # No partial write: source was not deleted.
+    assert sandbox.activities.read_text() == before
+
+
+def test_merge_no_provenance_succeeds_when_target_lacks_description(sandbox):
+    """With --no-provenance, the missing-description case must succeed."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    text = sandbox.activities.read_text()
+    anchor = text.index("- id: 2026-09-mg-target")
+    chunk = text[anchor:]
+    no_desc = chunk.replace("    description: |\n      Original target description.\n", "", 1)
+    sandbox.activities.write_text(text[:anchor] + no_desc)
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--no-provenance",
+        "--confirm",
+    )
+    assert rc == 0
+
+
+def test_merge_refuses_inline_scalar_description(sandbox):
+    """An inline scalar description (`description: hello`) must be refused
+    with --no-provenance suggested, not silently polluted.
+
+    Round-1 review finding #4.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    text = sandbox.activities.read_text()
+    # Replace target's literal-block description with an inline scalar.
+    inline = text.replace(
+        "    description: |\n      Original target description.\n",
+        "    description: hello inline\n",
+        1,
+    )
+    sandbox.activities.write_text(inline)
+    before = sandbox.activities.read_text()
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 1
+    assert "inline description" in out.lower()
+    assert sandbox.activities.read_text() == before
+
+
+def test_merge_inline_scalar_description_ok_with_no_provenance(sandbox):
+    """--no-provenance bypasses the inline-description check."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    text = sandbox.activities.read_text()
+    inline = text.replace(
+        "    description: |\n      Original target description.\n",
+        "    description: hello inline\n",
+        1,
+    )
+    sandbox.activities.write_text(inline)
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--no-provenance",
+        "--confirm",
+    )
+    assert rc == 0
+
+
+def test_merge_multi_source_does_not_double_count_cross_refs(sandbox):
+    """Repointing references in source A that mention source B (both about to
+    be deleted) must not inflate the ledger refs= count.
+
+    Round-1 review finding #8.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    # Source A mentions source B in its notes — that mention will be deleted
+    # along with A at step 6, so it must not be counted as a "work done" ref.
+    src_a = _merge_source_entry(id="2026-09-mg-src-a")
+    src_a["cpe"]["notes"] = "Related to 2026-09-mg-src-b."
+    sandbox.run("create", stdin=json.dumps(src_a))
+    src_b = {
+        "id": "2026-09-mg-src-b",
+        "date": "2026-09-01",
+        "title": "B",
+        "description": "B desc.",
+        "tags": ["btag"],
+        "docs": [],
+        "ptr": {
+            "category": "scholarly",
+            "subcategory": "cat3-other",
+            "notes": "b ptr",
+        },
+    }
+    sandbox.run("create", stdin=json.dumps(src_b))
+    sandbox.run(
+        "merge",
+        "2026-09-mg-src-a",
+        "2026-09-mg-src-b",
+        "--into",
+        "2026-09-mg-target",
+        "--on-block-conflict",
+        "keep-target",
+        "--confirm",
+    )
+    # The B-mention inside A's body must have been excluded from the refs
+    # count (and from the actual rewrite, since A gets deleted anyway).
+    text = sandbox.ledger.read_text()
+    # Only legitimate inbound mentions count. The synthesized source-to-source
+    # ref must NOT appear here. With no external references, refs=0.
+    assert "refs=0" in text
+
+
+def test_merge_ledger_records_carried_replaced_dropped_distinctions(sandbox):
+    """The ledger details distinguish carried / replaced / dropped block paths.
+
+    Round-1 review finding #6.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    # Source has cpe (carry-over candidate) and a conflicting ptr.
+    src = _merge_source_entry()
+    src["ptr"] = {
+        "category": "scholarly",
+        "subcategory": "cat3-other",
+        "notes": "src ptr",
+    }
+    sandbox.run("create", stdin=json.dumps(src))
+    sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--on-block-conflict",
+        "keep-source",  # replaces target's ptr
+        "--confirm",
+    )
+    text = sandbox.ledger.read_text()
+    # cpe was carried; ptr was replaced.
+    assert "carried:cpe" in text
+    assert "replaced:ptr" in text
+
+
+def test_merge_surfaces_first_wins_dropped_duplicate_source_blocks(sandbox):
+    """When two sources carry the same block target lacks, the second's drop
+    must surface in the dry-run plan output.
+
+    Round-1 review finding #5.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry(id="2026-09-mg-s1")))
+    sandbox.run(
+        "create",
+        stdin=json.dumps(
+            _merge_source_entry(id="2026-09-mg-s2", cpe={"group": "general", "credits": 9})
+        ),
+    )
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-s1",
+        "2026-09-mg-s2",
+        "--into",
+        "2026-09-mg-target",
+    )
+    assert rc == 0
+    assert "first source wins" in out.lower()
+    assert "2026-09-mg-s2" in out  # the dropped duplicate is named
+
+
+def test_merge_splice_block_helper_handles_unknown_block_name(sandbox):
+    """_splice_block_into_entry must not raise a misleading ValueError when
+    the block name isn't in schema_block_names.
+
+    Round-1 review finding #7. We exercise this indirectly through the
+    generic-block carry-over path (which exists now that #2 is fixed).
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    source = _merge_source_entry(id="2026-09-mg-unk")
+    source["unknown_block"] = {"a": 1, "b": "two"}
+    sandbox.run("create", stdin=json.dumps(source))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-unk",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    assert rc == 0
+    # The unknown block landed cleanly — no misleading "'foo' is not in list" error.
+    assert "is not in list" not in out
+    target = sandbox.entry("2026-09-mg-target")
+    assert target["unknown_block"]["a"] == 1
 
 
 # ---------------------------------------------------------------------------
