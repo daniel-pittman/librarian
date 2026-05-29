@@ -1037,6 +1037,51 @@ def _repoint_references(
     return repointed
 
 
+def _splice_block_into_entry(
+    lines: list[str],
+    start: int,
+    end: int,
+    block_name: str,
+    block_data: dict,
+    block_def,
+    schema_block_names: list[str],
+) -> int:
+    """Render and splice a schema block into a target entry's line range.
+
+    The insertion point preserves the schema-declaration order that
+    ``_render_entry`` establishes at create time: walk schema blocks after
+    ``block_name`` and splice just before the first one already on the entry;
+    fall back to inserting before the ``docs:`` line when no later block
+    exists. Mutates ``lines`` in place; returns the number of lines inserted.
+
+    Raises :class:`ValueError` when the ``docs:`` field can't be located
+    (entry malformed). Shared by :func:`cmd_set_block` and :func:`cmd_merge`
+    so any future fix to block insertion lands in both commands.
+    """
+    insert_idx = None
+    for later_name in schema_block_names[schema_block_names.index(block_name) + 1 :]:
+        candidate = _find_entry_field_line(lines, start, end, later_name)
+        if candidate is not None:
+            insert_idx = candidate
+            break
+    if insert_idx is None:
+        insert_idx = _find_entry_field_line(lines, start, end, "docs")
+    if insert_idx is None:
+        raise ValueError("could not locate insertion point ('docs:' field missing)")
+
+    field_indent = line_indent(lines[insert_idx])
+    sub_indent = field_indent + 2
+    new_lines = [f"{' ' * field_indent}{block_name}:\n"]
+    for fdef in block_def.fields:
+        if fdef.name not in block_data:
+            continue
+        rendered = _render_scalar(fdef, block_data[fdef.name])
+        new_lines.append(f"{' ' * sub_indent}{fdef.name}: {rendered}\n")
+
+    lines[insert_idx:insert_idx] = new_lines
+    return len(new_lines)
+
+
 def _scan_list_items(
     lines: list[str], parent_idx: int, end: int
 ) -> tuple[list[tuple[int, str]], int | None, int]:
@@ -1832,37 +1877,21 @@ def cmd_set_block(ctx: Context, args: list[str]) -> int:
             print(f"ERROR: {issue}")
         return 1
 
-    # Insertion point: preserve the schema-declaration order that _render_entry
-    # establishes at create time. Walk schema.blocks AFTER this one and splice
-    # before the first such later-in-schema block already on the entry; fall
-    # back to inserting before `docs:` only when no later block exists. This
-    # matters because `merge` (the next PR) will repeatedly carry blocks across
-    # entries, and divergence from schema order would compound across merges.
-    schema_block_names = [b.name for b in ctx.schema.blocks]
-    insert_idx = None
-    for later_name in schema_block_names[schema_block_names.index(block_name) + 1 :]:
-        candidate = _find_entry_field_line(lines, start, end, later_name)
-        if candidate is not None:
-            insert_idx = candidate
-            break
-    if insert_idx is None:
-        # No later block already present: place just before docs: (the natural
-        # next field after blocks in the core -> blocks -> docs -> tags layout).
-        insert_idx = _find_entry_field_line(lines, start, end, "docs")
-    if insert_idx is None:
-        print(f"ERROR: could not locate insertion point ('docs:' field missing on '{entry_id}')")
+    # Splice the rendered block into the entry via the shared helper (also
+    # used by merge). Schema-declaration order is preserved for both callers.
+    try:
+        _splice_block_into_entry(
+            lines,
+            start,
+            end,
+            block_name,
+            block_data,
+            block_def,
+            [b.name for b in ctx.schema.blocks],
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc} on '{entry_id}'")
         return 1
-
-    field_indent = line_indent(lines[insert_idx])
-    sub_indent = field_indent + 2
-    new_lines = [f"{' ' * field_indent}{block_name}:\n"]
-    for fdef in block_def.fields:
-        if fdef.name not in block_data:
-            continue
-        rendered = _render_scalar(fdef, block_data[fdef.name])
-        new_lines.append(f"{' ' * sub_indent}{fdef.name}: {rendered}\n")
-
-    lines[insert_idx:insert_idx] = new_lines
     write_lines(ctx.paths.activities, lines)
     append_ledger(
         ctx.paths.ledger,
@@ -2106,6 +2135,338 @@ def cmd_rename_id(ctx: Context, args: list[str]) -> int:
     write_lines(ctx.paths.activities, lines)
     append_ledger(ctx.paths.ledger, "rename-id", new_id, label, f"from={old_id} refs={repointed}")
     print(f"Renamed '{old_id}' -> '{new_id}' ({repointed} cross-reference(s) repointed)")
+    return 0
+
+
+def cmd_merge(ctx: Context, args: list[str]) -> int:
+    """Merge source entries into a target, atomically.
+
+    ``merge <source-id> [<source-id> ...] --into <target-id>
+    [--confirm] [--on-block-conflict abort|keep-target|keep-source]
+    [--no-provenance]``
+
+    Tags and docs are unioned onto the target (target's order first, then new
+    items in source order, de-duplicated). Schema blocks the target lacks are
+    carried over from sources; same-block conflicts respect
+    ``--on-block-conflict`` (default ``abort``). Every backticked or
+    plain-text reference to each source id is repointed to the target before
+    the source entries are deleted, so the merge does not leave dangling
+    cross-references. The target's description is kept as-is; source
+    descriptions are printed for the caller to fold in manually with
+    ``update-description`` (description merging is editorial, not mechanical).
+
+    Atomic: the read, plan, validate, and write all happen in memory before
+    a single ``write_lines`` call. Any failure (validation, conflict abort,
+    missing field) returns without touching the file.
+    """
+    label = _resolve_label(args, required=True)
+    if label is None:
+        return 1
+    if ("-h" in args or "--help" in args) and len(args) > 1:
+        print("ERROR: -h/--help must be used alone (no other arguments)")
+        return 2
+
+    parser = argparse.ArgumentParser(prog="librarian merge")
+    parser.add_argument("source_ids", nargs="+", help="entry id(s) to merge")
+    parser.add_argument("--into", required=True, dest="target_id", help="target entry id")
+    parser.add_argument("--confirm", action="store_true")
+    parser.add_argument(
+        "--on-block-conflict",
+        choices=["abort", "keep-target", "keep-source"],
+        default="abort",
+        dest="on_conflict",
+    )
+    parser.add_argument(
+        "--no-provenance",
+        action="store_true",
+        help="omit the plain-text 'Consolidates former entries: ...' note",
+    )
+    try:
+        parsed = parser.parse_args(args)
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 1
+
+    target_id = parsed.target_id
+    on_conflict = parsed.on_conflict
+    with_provenance = not parsed.no_provenance
+
+    # De-dup sources; skip self-merges silently.
+    source_ids: list[str] = []
+    seen_sources: set[str] = set()
+    for sid in parsed.source_ids:
+        if sid == target_id or sid in seen_sources:
+            continue
+        source_ids.append(sid)
+        seen_sources.add(sid)
+    if not source_ids:
+        print(
+            f"ERROR: no sources to merge (target '{target_id}' was the only "
+            f"id supplied, or all sources were duplicates)"
+        )
+        return 1
+
+    # Load activities (parsed) to compute the plan from data.
+    _, activities = load_activities(ctx.paths.activities)
+    by_id = {e.get("id"): e for e in activities}
+
+    if target_id not in by_id:
+        print(f"ERROR: target entry '{target_id}' not found")
+        return 1
+    missing = [sid for sid in source_ids if sid not in by_id]
+    if missing:
+        print(f"ERROR: source entries not found: {missing}")
+        return 1
+
+    target = by_id[target_id]
+    sources = [by_id[sid] for sid in source_ids]
+
+    # Tags union: target's order first, then new tags in source-order.
+    seen_tags = set(target.get("tags") or [])
+    new_tags: list[str] = []
+    for s in sources:
+        for tag in s.get("tags") or []:
+            if tag not in seen_tags:
+                new_tags.append(tag)
+                seen_tags.add(tag)
+
+    # Docs union: same shape.
+    seen_docs = set(target.get("docs") or [])
+    new_docs: list[str] = []
+    for s in sources:
+        for doc in s.get("docs") or []:
+            if doc not in seen_docs:
+                new_docs.append(doc)
+                seen_docs.add(doc)
+
+    # Block plan. For each schema block, classify: carry-over (target lacks it),
+    # conflict (both have it), or skip (source lacks it).
+    target_block_names = {b.name for b in ctx.schema.blocks if b.name in target}
+    blocks_to_carry: dict[str, tuple[str, dict]] = {}
+    conflicts: list[tuple[str, str]] = []
+    for s in sources:
+        sid = s.get("id")
+        for b in ctx.schema.blocks:
+            if b.name not in s:
+                continue
+            if b.name in target_block_names:
+                conflicts.append((b.name, sid))
+                continue
+            if b.name not in blocks_to_carry:
+                # First source providing this block wins; later sources with
+                # the same block are recorded as carry-over candidates that
+                # were skipped (left implicit; the source description still
+                # surfaces in the dry-run output for manual review).
+                blocks_to_carry[b.name] = (sid, s[b.name])
+
+    # Apply on-block-conflict policy.
+    dropped_for_keep_target: list[tuple[str, str]] = []
+    if conflicts:
+        if on_conflict == "abort":
+            print("ERROR: source(s) carry block(s) that already exist on the target:")
+            for bn, sid in conflicts:
+                print(f"  block '{bn}' from source '{sid}' conflicts with target's '{bn}'")
+            print(
+                "Pass --on-block-conflict keep-target (drop source's block) "
+                "or keep-source (replace target's block) to resolve."
+            )
+            return 1
+        if on_conflict == "keep-target":
+            dropped_for_keep_target = list(conflicts)
+        else:  # keep-source: first conflicting source wins
+            for bn, sid in conflicts:
+                if bn not in blocks_to_carry:
+                    blocks_to_carry[bn] = (sid, by_id[sid][bn])
+
+    # Validate every carried-over block against the schema BEFORE any write.
+    for bn, (sid, block_data) in blocks_to_carry.items():
+        block_def = ctx.schema.block(bn)
+        if block_def is None:
+            continue  # unknown block (generic mode) — schema doesn't validate it
+        issues = validate_block(block_def, block_data)
+        if issues:
+            print(f"ERROR: block '{bn}' carried from source '{sid}' fails schema validation:")
+            for issue in issues:
+                print(f"  {issue}")
+            return 1
+
+    # Read lines so we can compute repoint counts for the preview.
+    lines = read_lines(ctx.paths.activities)
+    repoint_counts: dict[str, int] = {}
+    for sid in source_ids:
+        s_start, s_end = find_entry_line_range(lines, sid)
+        pattern = re.compile(rf"(?<![a-z0-9-]){re.escape(sid)}(?![a-z0-9-])")
+        n = 0
+        for i, line in enumerate(lines):
+            if s_start <= i < s_end:
+                continue
+            n += len(pattern.findall(line))
+        repoint_counts[sid] = n
+
+    # Print the plan.
+    print(f"Merge plan: {len(source_ids)} source(s) -> '{target_id}'")
+    print(f"  Sources: {', '.join(source_ids)}")
+    print(f"  Tags to add: {len(new_tags)}" + (f" ({new_tags})" if new_tags else ""))
+    print(f"  Docs to add: {len(new_docs)}")
+    if blocks_to_carry:
+        print(
+            "  Blocks to carry over: "
+            + ", ".join(f"{bn} from {sid}" for bn, (sid, _) in blocks_to_carry.items())
+        )
+    if dropped_for_keep_target:
+        print(
+            "  Source blocks dropped (--on-block-conflict keep-target): "
+            + ", ".join(f"{bn} from {sid}" for bn, sid in dropped_for_keep_target)
+        )
+    print("  Inbound references to repoint:")
+    for sid in source_ids:
+        print(f"    {sid}: {repoint_counts[sid]}")
+
+    print("\nSource descriptions (fold what you want into the target via update-description):")
+    print("---")
+    for s in sources:
+        sid = s.get("id")
+        print(f"## From {sid}")
+        print((s.get("description") or "").strip())
+        print()
+    print("---")
+
+    if not parsed.confirm:
+        print("\nDry run — pass --confirm to actually merge.")
+        return 0
+
+    # --- Execute (all mutations on `lines` in memory; one write at the end) ---
+
+    schema_block_names = [b.name for b in ctx.schema.blocks]
+
+    # 1. Repoint references for each source. Capture the helper's return value
+    #    rather than trusting the preview pre-count, matching PR #16's lesson
+    #    that a hand-rolled count loop will silently drift if the helper grows.
+    actual_repoint_total = 0
+    for sid in source_ids:
+        s_start, s_end = find_entry_line_range(lines, sid)
+        actual_repoint_total += _repoint_references(
+            lines, sid, target_id, skip_range=(s_start, s_end)
+        )
+
+    # 2. Carry blocks onto the target. For keep-source we may have to delete
+    #    the target's existing block first; re-locate target's range before
+    #    each splice because splices shift line indices below the target.
+    for bn, (_sid, block_data) in blocks_to_carry.items():
+        t_start, t_end = find_entry_line_range(lines, target_id)
+        existing_idx = _find_entry_field_line(lines, t_start, t_end, bn)
+        if existing_idx is not None:
+            block_indent = line_indent(lines[existing_idx])
+            block_end = t_end
+            for i in range(existing_idx + 1, t_end):
+                stripped = lines[i].strip()
+                if stripped and line_indent(lines[i]) <= block_indent:
+                    block_end = i
+                    break
+            del lines[existing_idx:block_end]
+            t_start, t_end = find_entry_line_range(lines, target_id)
+        block_def = ctx.schema.block(bn)
+        if block_def is None:
+            continue  # unknown block: not splice-able without a definition
+        try:
+            _splice_block_into_entry(
+                lines, t_start, t_end, bn, block_data, block_def, schema_block_names
+            )
+        except ValueError as exc:
+            print(f"ERROR: {exc} on '{target_id}'")
+            return 1
+
+    # 3. Union tags into target's tags list. Handle inline + multi-line, the
+    #    same shapes cmd_add_tags supports, so a hand-edited target survives.
+    if new_tags:
+        t_start, t_end = find_entry_line_range(lines, target_id)
+        tags_idx = _find_entry_field_line(lines, t_start, t_end, "tags")
+        if tags_idx is None:
+            print(f"ERROR: tags: field missing on '{target_id}'")
+            return 1
+        content = lines[tags_idx].split("tags:", 1)[1].strip()
+        indent = " " * line_indent(lines[tags_idx])
+        if content.startswith("[") and content != "[]":
+            existing_inline = [
+                t.strip().strip("\"'") for t in content.strip("[] ").split(",") if t.strip()
+            ]
+            existing_inline += new_tags
+            lines[tags_idx] = f"{indent}tags: [{', '.join(repr(t) for t in existing_inline)}]\n"
+        else:
+            items, first_item_idx, last_item_idx = _scan_list_items(lines, tags_idx, t_end)
+            if content == "[]":
+                lines[tags_idx] = f"{indent}tags:\n"
+            item_indent = (
+                " " * line_indent(lines[first_item_idx])
+                if first_item_idx is not None
+                else indent + "  "
+            )
+            for offset, tag in enumerate(new_tags):
+                lines.insert(last_item_idx + 1 + offset, f"{item_indent}- {tag}\n")
+
+    # 4. Union docs into target's docs list (multi-line is the dominant shape).
+    if new_docs:
+        t_start, t_end = find_entry_line_range(lines, target_id)
+        docs_idx = _find_entry_field_line(lines, t_start, t_end, "docs")
+        if docs_idx is None:
+            print(f"ERROR: docs: field missing on '{target_id}'")
+            return 1
+        content = lines[docs_idx].split("docs:", 1)[1].strip()
+        indent = " " * line_indent(lines[docs_idx])
+        if content == "[]":
+            lines[docs_idx] = f"{indent}docs:\n"
+            item_indent = indent + "  "
+            for offset, doc in enumerate(new_docs):
+                lines.insert(docs_idx + 1 + offset, f'{item_indent}- "{doc}"\n')
+        else:
+            items, first_item_idx, last_item_idx = _scan_list_items(lines, docs_idx, t_end)
+            item_indent = (
+                " " * line_indent(lines[first_item_idx])
+                if first_item_idx is not None
+                else indent + "  "
+            )
+            for offset, doc in enumerate(new_docs):
+                lines.insert(last_item_idx + 1 + offset, f'{item_indent}- "{doc}"\n')
+
+    # 5. Provenance note. Plain text only — backticked ids would trip the
+    #    validate dangling-ref scanner once the source entries are deleted.
+    if with_provenance:
+        t_start, t_end = find_entry_line_range(lines, target_id)
+        desc_idx = _find_entry_field_line(lines, t_start, t_end, "description")
+        if desc_idx is not None:
+            desc_indent = line_indent(lines[desc_idx])
+            body_end = t_end
+            for i in range(desc_idx + 1, t_end):
+                if lines[i].strip() and line_indent(lines[i]) <= desc_indent:
+                    body_end = i
+                    break
+            body_indent = desc_indent + 2
+            note = f"{' ' * body_indent}Consolidates former entries: {', '.join(source_ids)}.\n"
+            lines.insert(body_end, note)
+
+    # 6. Delete source entries in descending order so earlier source ranges
+    #    stay valid as later ones are removed.
+    source_ranges: list[tuple[int, int]] = []
+    for sid in source_ids:
+        s_start, s_end = find_entry_line_range(lines, sid)
+        if s_start is not None:
+            source_ranges.append((s_start, s_end))
+    for s_start, s_end in sorted(source_ranges, key=lambda r: r[0], reverse=True):
+        del lines[s_start:s_end]
+
+    # 7. Single write + single ledger entry for the whole transaction.
+    write_lines(ctx.paths.activities, lines)
+    details = (
+        f"sources={','.join(source_ids)} "
+        f"blocks={','.join(blocks_to_carry.keys()) if blocks_to_carry else 'none'} "
+        f"tags={len(new_tags)} docs={len(new_docs)} "
+        f"refs={actual_repoint_total}"
+    )
+    append_ledger(ctx.paths.ledger, "merge", target_id, label, details=details)
+    print(
+        f"Merged {len(source_ids)} source(s) into '{target_id}' "
+        f"({actual_repoint_total} reference(s) repointed; "
+        f"{len(new_tags)} tag(s) + {len(new_docs)} doc(s) added)"
+    )
     return 0
 
 
@@ -2545,6 +2906,7 @@ COMMANDS = {
     "add-docs": cmd_add_docs,
     "remove-docs": cmd_remove_docs,
     "rename-id": cmd_rename_id,
+    "merge": cmd_merge,
     # file inventory
     "file-add": cmd_file_add,
     "file-list": cmd_file_list,

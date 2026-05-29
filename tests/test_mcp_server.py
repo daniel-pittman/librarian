@@ -86,6 +86,51 @@ def test_out_surfaces_stderr_on_failure():
     assert mcp_server._out({"ok": False, "stdout": "", "stderr": "boom"}) == "ERROR: boom"
 
 
+def test_merge_tool_translates_to_cli(monkeypatch):
+    """librarian_merge forwards source_ids, --into, conflict policy, and flags."""
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        captured["env"] = kw.get("extra_env")
+        return {"ok": True, "stdout": "merged\n", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    mcp_server.librarian_merge(
+        source_ids=["2026-09-s1", "2026-09-s2"],
+        target_id="2026-09-tgt",
+        session_label="mcp:test",
+        confirm=True,
+        on_block_conflict="keep-target",
+        with_provenance=False,
+    )
+    assert captured["args"] == [
+        "merge",
+        "2026-09-s1",
+        "2026-09-s2",
+        "--into",
+        "2026-09-tgt",
+        "--on-block-conflict",
+        "keep-target",
+        "--no-provenance",
+        "--confirm",
+    ]
+    assert captured["env"] == {"LIBRARIAN_SESSION_LABEL": "mcp:test"}
+
+
+def test_merge_tool_defaults_translate_minimally(monkeypatch):
+    """Default args (abort + with provenance + no confirm) produce a minimal argv."""
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        return {"ok": True, "stdout": "", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    mcp_server.librarian_merge(source_ids=["s"], target_id="t", session_label="mcp:test")
+    assert captured["args"] == ["merge", "s", "--into", "t"]
+
+
 def test_delete_tool_forwards_repoint_to_flag(monkeypatch):
     """librarian_delete forwards (entry_id, --repoint-to, target, --confirm) correctly.
 
