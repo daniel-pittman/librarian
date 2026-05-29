@@ -335,6 +335,231 @@ def test_update_nested_field_rejects_bad_dependent_enum(sandbox):
     assert "INVALID" in out
 
 
+# ---------------------------------------------------------------------------
+# set-block (add a schema block to an existing entry)
+# ---------------------------------------------------------------------------
+
+
+def _ptr_only_entry(**overrides) -> dict:
+    """A minimal valid ptr-only entry, suitable for adding a cpe block to."""
+    base = {
+        "id": "2026-09-sb-target",
+        "date": "2026-09-01",
+        "title": "set-block target",
+        "description": "A ptr-only entry to test adding a cpe block.",
+        "tags": ["t"],
+        "docs": ["https://example.com/a"],
+        "ptr": {
+            "category": "service",
+            "subcategory": "external-professional",
+            "notes": "ptr-only.",
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def test_set_block_adds_full_block_to_existing_entry(sandbox):
+    """set-block adds a complete block; round-trips as native Python types."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        json.dumps({"group": "primary", "credits": 10, "submitted": True, "notes": "ten credits"}),
+    )
+    assert rc == 0
+    cpe = sandbox.entry("2026-09-sb-target")["cpe"]
+    assert cpe["group"] == "primary"
+    assert cpe["credits"] == 10  # int, not "10"
+    assert cpe["submitted"] is True  # bool, not "true"
+    assert cpe["notes"] == "ten credits"
+
+
+def test_set_block_preserves_existing_block_and_core_fields(sandbox):
+    """Adding a new block leaves the existing block and core fields untouched."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    before = sandbox.entry("2026-09-sb-target")
+    sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        json.dumps({"group": "primary", "credits": 5}),
+    )
+    after = sandbox.entry("2026-09-sb-target")
+    assert after["ptr"] == before["ptr"]
+    for field in ("id", "date", "title", "description", "tags", "docs"):
+        assert after[field] == before[field]
+
+
+def test_set_block_rejects_unknown_block(sandbox):
+    """A block name not declared by the schema is rejected."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run("set-block", "2026-09-sb-target", "nope", "{}")
+    assert rc == 1
+    assert "not declared" in out.lower()
+
+
+def test_set_block_rejects_unknown_field(sandbox):
+    """A field not declared on the block is rejected (typos surface)."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        json.dumps({"group": "primary", "credits": 1, "oops": "x"}),
+    )
+    assert rc == 1
+    assert "unknown field" in out.lower()
+
+
+def test_set_block_rejects_missing_required(sandbox):
+    """The whole block is validated; a missing required field is reported."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        json.dumps({"group": "primary"}),  # missing credits
+    )
+    assert rc == 1
+    assert "MISSING CPE.CREDITS" in out
+
+
+def test_set_block_rejects_bad_enum_value(sandbox):
+    """An out-of-set enum value is rejected, listing the allowed values."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        json.dumps({"group": "bogus", "credits": 1}),
+    )
+    assert rc == 1
+    assert "INVALID CPE.GROUP" in out
+
+
+def test_set_block_refuses_when_block_already_present(sandbox):
+    """set-block is a creation primitive; editing existing blocks is forbidden."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "ptr",
+        json.dumps({"category": "scholarly", "subcategory": "cat3-other"}),
+    )
+    assert rc == 1
+    assert "already present" in out.lower()
+    assert "update-block-field" in out.lower()
+
+
+def test_set_block_rejects_invalid_json(sandbox):
+    """A non-JSON payload is a clean error, not a crash."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run("set-block", "2026-09-sb-target", "cpe", "not-json")
+    assert rc == 1
+    assert "not valid json" in out.lower()
+
+
+def test_set_block_rejects_non_object_payload(sandbox):
+    """The block payload must be a JSON object, not a list/string/etc."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run("set-block", "2026-09-sb-target", "cpe", "[1,2,3]")
+    assert rc == 1
+    assert "json object" in out.lower()
+
+
+def test_set_block_rejects_unknown_entry(sandbox):
+    """An unknown entry id errors out without writing."""
+    before = _line_count(sandbox.activities)
+    out, _, rc = sandbox.run(
+        "set-block", "no-such-entry", "cpe", json.dumps({"group": "primary", "credits": 1})
+    )
+    assert rc == 1
+    assert "not found" in out.lower()
+    assert _line_count(sandbox.activities) == before
+
+
+def test_set_block_requires_session_label(sandbox):
+    """A write command with no session label is rejected (project invariant)."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        json.dumps({"group": "primary", "credits": 1}),
+        extra_env={"LIBRARIAN_SESSION_LABEL": ""},
+    )
+    assert rc == 1
+    assert "require" in out.lower()
+
+
+def test_set_block_writes_ledger_entry(sandbox):
+    """Every set-block write appends an attributed line to the ledger."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        json.dumps({"group": "primary", "credits": 1}),
+    )
+    text = sandbox.ledger.read_text()
+    assert "set-block" in text
+    assert "2026-09-sb-target" in text
+
+
+def test_set_block_no_partial_write_on_validation_failure(sandbox):
+    """A schema-validation failure must not modify the activities file at all."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    before = sandbox.activities.read_text()
+    sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        json.dumps({"group": "primary"}),  # missing required credits
+    )
+    assert sandbox.activities.read_text() == before
+
+
+def test_set_block_does_not_affect_other_entries(sandbox):
+    """Adding a block to one entry leaves a different entry byte-identical."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    untouched_before = sandbox.entry("2025-04-journal-article")
+    sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        json.dumps({"group": "primary", "credits": 1}),
+    )
+    assert sandbox.entry("2025-04-journal-article") == untouched_before
+
+
+def test_set_block_renders_int_unquoted_so_it_parses_back_as_int(sandbox):
+    """A schema-int field must round-trip as a Python int, not a string."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        json.dumps({"group": "primary", "credits": 42}),
+    )
+    assert isinstance(sandbox.entry("2026-09-sb-target")["cpe"]["credits"], int)
+
+
+def test_set_block_renders_bool_unquoted_so_it_parses_back_as_bool(sandbox):
+    """A schema-bool field must round-trip as a Python bool, not a string."""
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        json.dumps({"group": "primary", "credits": 1, "submitted": False}),
+    )
+    cpe = sandbox.entry("2026-09-sb-target")["cpe"]
+    assert cpe["submitted"] is False
+    assert isinstance(cpe["submitted"], bool)
+
+
 def test_update_nested_field_rejects_unknown_path(sandbox):
     """update-nested-field rejects a block/field the schema does not declare."""
     out, _, rc = sandbox.run("update-nested-field", "2025-02-conference-talk", "ptr.bogus", "x")

@@ -86,6 +86,35 @@ def test_out_surfaces_stderr_on_failure():
     assert mcp_server._out({"ok": False, "stdout": "", "stderr": "boom"}) == "ERROR: boom"
 
 
+def test_set_block_tool_translates_to_cli(monkeypatch):
+    """librarian_set_block forwards (entry_id, block, fields_json) to the CLI.
+
+    Project invariant: every new flag/command exists on both the CLI and the
+    MCP server with matching behavior.
+    """
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        captured["env"] = kw.get("extra_env")
+        return {"ok": True, "stdout": "ok\n", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    mcp_server.librarian_set_block(
+        entry_id="2026-09-target",
+        block="cpe",
+        fields_json='{"group":"primary","credits":10}',
+        session_label="mcp:test",
+    )
+    assert captured["args"] == [
+        "set-block",
+        "2026-09-target",
+        "cpe",
+        '{"group":"primary","credits":10}',
+    ]
+    assert captured["env"] == {"LIBRARIAN_SESSION_LABEL": "mcp:test"}
+
+
 def test_env_tool_translates_to_cli(monkeypatch):
     """librarian_env shells out to the `env` CLI command and returns its output."""
     captured = {}

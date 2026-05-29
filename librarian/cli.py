@@ -1572,6 +1572,97 @@ def cmd_update_nested_field(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+def cmd_set_block(ctx: Context, args: list[str]) -> int:
+    """Add a schema block to an existing entry. ``set-block <id> <block> <json>``
+
+    The block must be declared by the active schema and must NOT already be
+    present on the entry (use ``update-block-field`` to edit existing
+    fields). The supplied JSON object is validated as a complete block
+    against the schema before the write: unknown fields are rejected, and
+    required fields must be present.
+    """
+    label = _resolve_label(args, required=True)
+    if label is None:
+        return 1
+    if len(args) < 3:
+        print("Usage: librarian set-block <id> <block> <json>")
+        return 1
+    entry_id, block_name, raw_json = args[0], args[1], " ".join(args[2:])
+
+    block_def = ctx.schema.block(block_name)
+    if ctx.schema.is_empty or block_def is None:
+        print(f"ERROR: block '{block_name}' is not declared by the active schema")
+        return 1
+
+    try:
+        block_data = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        print(f"ERROR: block fields are not valid JSON: {exc}")
+        return 1
+    if not isinstance(block_data, dict):
+        print("ERROR: block fields must be a JSON object")
+        return 1
+
+    # Reject unknown fields so typos surface immediately, before validation.
+    known_fields = {f.name for f in block_def.fields}
+    unknown = sorted(k for k in block_data if k not in known_fields)
+    if unknown:
+        print(f"ERROR: unknown field(s) for block '{block_name}': {unknown}")
+        return 1
+
+    # Validate the entire block atomically (catches missing required fields,
+    # bad enum values, dependent-enum mismatches, etc.).
+    issues = validate_block(block_def, block_data)
+    if issues:
+        for issue in issues:
+            print(f"ERROR: {issue}")
+        return 1
+
+    lines = read_lines(ctx.paths.activities)
+    start, end = find_entry_line_range(lines, entry_id)
+    if start is None:
+        print(f"ERROR: entry '{entry_id}' not found")
+        return 1
+
+    # Refuse if the block already exists on this entry. set-block is a creation
+    # primitive; editing existing block fields goes through update-block-field.
+    for i in range(start, end):
+        if lines[i].strip().startswith(f"{block_name}:"):
+            print(
+                f"ERROR: block '{block_name}' already present on entry '{entry_id}'. "
+                f"Use update-block-field to edit its fields."
+            )
+            return 1
+
+    # Insert the new block just before the entry's `docs:` line, so it joins
+    # any existing blocks in the standard core->blocks->docs->tags order.
+    docs_idx = _find_field_line(lines, start, end, "docs")
+    if docs_idx is None:
+        print(f"ERROR: could not locate insertion point ('docs:' field missing on '{entry_id}')")
+        return 1
+
+    field_indent = line_indent(lines[docs_idx])
+    sub_indent = field_indent + 2
+    new_lines = [f"{' ' * field_indent}{block_name}:\n"]
+    for fdef in block_def.fields:
+        if fdef.name not in block_data:
+            continue
+        rendered = _render_scalar(fdef, block_data[fdef.name])
+        new_lines.append(f"{' ' * sub_indent}{fdef.name}: {rendered}\n")
+
+    lines[docs_idx:docs_idx] = new_lines
+    write_lines(ctx.paths.activities, lines)
+    append_ledger(
+        ctx.paths.ledger,
+        "set-block",
+        entry_id,
+        label,
+        f"block={block_name} fields={len(block_data)}",
+    )
+    print(f"Added block '{block_name}' to '{entry_id}' with {len(block_data)} field(s)")
+    return 0
+
+
 def _tags_line(lines: list[str], start: int, end: int) -> int | None:
     """Return the index of the ``tags:`` line within an entry."""
     return _find_field_line(lines, start, end, "tags")
@@ -2243,6 +2334,7 @@ COMMANDS = {
     "update-description": cmd_update_description,
     "update-notes": cmd_update_notes,
     "update-nested-field": cmd_update_nested_field,
+    "set-block": cmd_set_block,
     "add-tags": cmd_add_tags,
     "remove-tags": cmd_remove_tags,
     "add-docs": cmd_add_docs,

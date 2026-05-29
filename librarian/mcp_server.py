@@ -491,6 +491,25 @@ def librarian_update_block_field(
 
 
 @mcp.tool()
+def librarian_set_block(entry_id: str, block: str, fields_json: str, session_label: str) -> str:
+    """Add a schema block to an existing entry.
+
+    ``fields_json`` is a JSON object of field values for the block (e.g.
+    ``{"group": "primary", "credits": 10}``). The block must be declared by
+    the active schema and must not already be present on the entry; the full
+    block is validated atomically before the write. To edit an existing
+    block's fields, use ``librarian_update_block_field``.
+    """
+    label = _validate_label(session_label)
+    return _out(
+        _run_cli(
+            ["set-block", entry_id, block, fields_json],
+            extra_env={"LIBRARIAN_SESSION_LABEL": label},
+        )
+    )
+
+
+@mcp.tool()
 def librarian_add_tags(entry_id: str, tags: list[str], session_label: str) -> str:
     """Add tags to an entry (idempotent — duplicates are no-ops)."""
     label = _validate_label(session_label)
