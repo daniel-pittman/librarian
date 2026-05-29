@@ -1342,13 +1342,21 @@ def _render_scalar(field, value) -> str:
 
 
 def _render_generic_scalar(value) -> str:
-    """Render an unknown-block scalar value for YAML output."""
+    """Render an unknown-block field value for YAML output.
+
+    Scalars (None / bool / int / str) are rendered directly. Lists and dicts
+    are serialized with ``yaml.dump`` so the structure round-trips faithfully
+    instead of being stringified into a Python ``repr`` that loads back as a
+    text scalar.
+    """
     if value is None:
         return "null"
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, (list, dict)):
+        return yaml.dump(value, default_flow_style=True).rstrip("\n")
     return yaml_quote(str(value))
 
 
@@ -2193,6 +2201,11 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
     parser.add_argument("--into", required=True, dest="target_id", help="target entry id")
     parser.add_argument("--confirm", action="store_true")
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="preview only (the default until --confirm is passed); overrides --confirm",
+    )
+    parser.add_argument(
         "--on-block-conflict",
         choices=["abort", "keep-target", "keep-source"],
         default="abort",
@@ -2207,6 +2220,11 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
         parsed = parser.parse_args(args)
     except SystemExit as exc:
         return int(exc.code) if isinstance(exc.code, int) else 1
+
+    # --dry-run wins over --confirm so the README's "dry-run is the default
+    # until --confirm" wording holds and an explicit --dry-run is honored.
+    if parsed.dry_run:
+        parsed.confirm = False
 
     target_id = parsed.target_id
     on_conflict = parsed.on_conflict
@@ -2292,6 +2310,31 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
             ):
                 out.append(key)
         return out
+
+    # Refuse to merge a source carrying top-level non-core, non-block keys
+    # whose values aren't mappings (list, scalar). The merge has no safe way
+    # to fold those into the target (no schema definition, no shape rule),
+    # and silently deleting them with the source is the same data-loss class
+    # that round-1 #2 set out to eliminate. The user is told exactly which
+    # keys are blocking so they can edit the source first.
+    non_carryable: list[tuple[str, str]] = []
+    for s in sources:
+        sid = s.get("id")
+        for key, value in s.items():
+            if key in _core_keys_for_merge or key in schema_known_names:
+                continue
+            if isinstance(value, dict):
+                continue
+            non_carryable.append((sid, key))
+    if non_carryable:
+        print("ERROR: source(s) have top-level non-block fields that merge cannot safely carry:")
+        for sid, key in non_carryable:
+            print(f"  '{sid}': '{key}'")
+        print(
+            "Fold the values into target's description (or convert each key "
+            "to a schema-declared block) before merging."
+        )
+        return 1
 
     target_block_names = set(_source_block_names(target))
     blocks_to_carry: dict[str, tuple[str, dict]] = {}
@@ -2446,11 +2489,22 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
         if existing_idx is not None:
             block_indent = line_indent(lines[existing_idx])
             block_end = t_end
+            # The terminator must be an actual entry-field line (or the next
+            # entry's `- id:` line), not a flush-left comment inside the block.
+            # Comments and blanks are skipped; otherwise a hand-edited block
+            # with a stray `# comment` inside would cause keep-source to
+            # delete only its prefix and leave stale fields behind.
             for i in range(existing_idx + 1, t_end):
                 stripped = lines[i].strip()
-                if stripped and line_indent(lines[i]) <= block_indent:
-                    block_end = i
-                    break
+                if not stripped or stripped.startswith("#"):
+                    continue
+                indent_here = line_indent(lines[i])
+                if indent_here > block_indent:
+                    continue  # still inside the block (child line)
+                # At indent <= block_indent: either the next field at entry-field
+                # indent (== block_indent), or the next entry's `- id:` line.
+                block_end = i
+                break
             del lines[existing_idx:block_end]
             t_start, t_end = find_entry_line_range(lines, target_id)
         block_def = ctx.schema.block(bn)  # may be None (generic block)
@@ -2461,6 +2515,23 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
         except ValueError as exc:
             print(f"ERROR: {exc} on '{target_id}'")
             return 1
+
+    # 2b. The just-spliced block content was lifted verbatim from a source
+    #     range that step 1 skipped, so any mention of ANOTHER source's id
+    #     inside that content didn't get repointed. Rewrite those mentions
+    #     now, scoped to the target's range, before step 6 deletes the
+    #     referenced sources and leaves a dangling cross-reference. The
+    #     count is added to actual_repoint_total for the ledger summary.
+    if blocks_to_carry:
+        t_start, t_end = find_entry_line_range(lines, target_id)
+        target_range = (t_start, t_end)
+        for sid in source_ids:
+            pattern = re.compile(rf"(?<![a-z0-9-]){re.escape(sid)}(?![a-z0-9-])")
+            for i in range(target_range[0], target_range[1]):
+                new_line, n = pattern.subn(target_id, lines[i])
+                if n:
+                    lines[i] = new_line
+                    actual_repoint_total += n
 
     # 3. Union tags into target's tags list. Handle inline + multi-line, the
     #    same shapes cmd_add_tags supports, so a hand-edited target survives.
@@ -2473,11 +2544,19 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
         content = lines[tags_idx].split("tags:", 1)[1].strip()
         indent = " " * line_indent(lines[tags_idx])
         if content.startswith("[") and content != "[]":
-            existing_inline = [
-                t.strip().strip("\"'") for t in content.strip("[] ").split(",") if t.strip()
-            ]
-            existing_inline += new_tags
-            lines[tags_idx] = f"{indent}tags: [{', '.join(repr(t) for t in existing_inline)}]\n"
+            # Parse with yaml.safe_load so embedded commas (rare for tags but
+            # the same code path serves docs below where URLs commonly carry
+            # commas) and mixed quote styles round-trip safely; render with
+            # yaml_quote which produces valid YAML escapes (vs. Python repr,
+            # which emits backslash escapes that single-quoted YAML rejects).
+            try:
+                parsed_inline = yaml.safe_load(content) or []
+            except yaml.YAMLError:
+                parsed_inline = []
+            existing_inline = [str(t) for t in parsed_inline] + list(new_tags)
+            lines[tags_idx] = (
+                f"{indent}tags: [" + ", ".join(yaml_quote(t) for t in existing_inline) + "]\n"
+            )
         else:
             items, first_item_idx, last_item_idx = _scan_list_items(lines, tags_idx, t_end)
             if content == "[]":
@@ -2503,16 +2582,19 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
         content = lines[docs_idx].split("docs:", 1)[1].strip()
         indent = " " * line_indent(lines[docs_idx])
         if content.startswith("[") and content != "[]":
-            existing_inline = [
-                d.strip().strip("\"'") for d in content.strip("[] ").split(",") if d.strip()
-            ]
-            existing_inline += new_docs
-            lines[docs_idx] = f"{indent}docs: [{', '.join(repr(d) for d in existing_inline)}]\n"
+            try:
+                parsed_inline = yaml.safe_load(content) or []
+            except yaml.YAMLError:
+                parsed_inline = []
+            existing_inline = [str(d) for d in parsed_inline] + list(new_docs)
+            lines[docs_idx] = (
+                f"{indent}docs: [" + ", ".join(yaml_quote(d) for d in existing_inline) + "]\n"
+            )
         elif content == "[]":
             lines[docs_idx] = f"{indent}docs:\n"
             item_indent = indent + "  "
             for offset, doc in enumerate(new_docs):
-                lines.insert(docs_idx + 1 + offset, f'{item_indent}- "{doc}"\n')
+                lines.insert(docs_idx + 1 + offset, f"{item_indent}- {yaml_quote(doc)}\n")
         else:
             items, first_item_idx, last_item_idx = _scan_list_items(lines, docs_idx, t_end)
             item_indent = (
@@ -2521,7 +2603,7 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
                 else indent + "  "
             )
             for offset, doc in enumerate(new_docs):
-                lines.insert(last_item_idx + 1 + offset, f'{item_indent}- "{doc}"\n')
+                lines.insert(last_item_idx + 1 + offset, f"{item_indent}- {yaml_quote(doc)}\n")
 
     # 5. Provenance note. Plain text only — backticked ids would trip the
     #    validate dangling-ref scanner once the source entries are deleted.
@@ -2539,6 +2621,12 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
             )
             return 1
         desc_content = lines[desc_idx].split("description:", 1)[1].strip()
+        if not desc_content:
+            print(
+                f"ERROR: target '{target_id}' has an empty description field; cannot "
+                f"add provenance note (re-run with --no-provenance to skip it)"
+            )
+            return 1
         if not (desc_content.startswith("|") or desc_content.startswith(">")):
             print(
                 f"ERROR: target '{target_id}' has an inline description scalar; "
@@ -2547,12 +2635,23 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
             )
             return 1
         desc_indent = line_indent(lines[desc_idx])
+        # Locate the body's end AND derive body_indent from the first non-blank
+        # body line — explicit indent indicators (`|4`) or hand-edits may put
+        # body at deeper than desc_indent + 2, and hard-coding +2 would either
+        # shallow-terminate the literal block (turning the note into an unknown
+        # top-level mapping key) or fold it into the value silently.
         body_end = t_end
+        body_indent: int | None = None
         for i in range(desc_idx + 1, t_end):
-            if lines[i].strip() and line_indent(lines[i]) <= desc_indent:
+            stripped = lines[i].strip()
+            line_idx_indent = line_indent(lines[i])
+            if stripped and line_idx_indent <= desc_indent:
                 body_end = i
                 break
-        body_indent = desc_indent + 2
+            if stripped and body_indent is None:
+                body_indent = line_idx_indent
+        if body_indent is None:
+            body_indent = desc_indent + 2
         note = f"{' ' * body_indent}Consolidates former entries: {', '.join(source_ids)}.\n"
         lines.insert(body_end, note)
 
