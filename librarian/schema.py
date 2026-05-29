@@ -291,13 +291,17 @@ def validate_block(block: BlockDef, block_data: dict) -> list[str]:
                 )
             continue
 
-        # A null value satisfies a nullable date and is otherwise skipped:
-        # an explicitly-null optional field is treated as "not set".
+        # An explicitly-null OPTIONAL field is treated as "not set". For a
+        # REQUIRED field, ``null`` is a hard error regardless of type — the
+        # only exception is ``date?``, the nullable-date type, which exists
+        # specifically to permit null. Prior to broadening this, only the
+        # date branch enforced required+null; set-block (and any future
+        # full-block writer like merge) could otherwise land a block on disk
+        # with every required field explicitly null.
         if value is None:
-            if field.type == "date" and field.required:
+            if field.required and field.type != "date?":
                 issues.append(
-                    f"INVALID {block.name.upper()}.{field.name.upper()}: "
-                    f"value is null but a date is required"
+                    f"INVALID {block.name.upper()}.{field.name.upper()}: required field is null"
                 )
             continue
 

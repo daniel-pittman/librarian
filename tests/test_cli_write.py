@@ -890,6 +890,81 @@ def test_set_block_inserts_in_schema_declaration_order(sandbox):
     )
 
 
+def test_set_block_rejects_date_field_with_newline(sandbox):
+    """A type='date?' (or date) field with a trailing LF must be rejected.
+
+    Closes the symmetric-gap pattern: the prior fixes covered text/string/enum
+    but date/date? slipped through because the ISO regex matches a trailing
+    newline. The fix is type-agnostic (any str value), so adding a new schema
+    type can never re-open this class of bug.
+    """
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps(
+            {
+                "group": "primary",
+                "credits": 1,
+                "submission_date": "2024-01-01\n",
+            }
+        ),
+    )
+    assert rc == 1
+    assert "newline" in out.lower()
+
+
+def test_set_block_newline_check_runs_after_existence(sandbox):
+    """The already-present error fires before the newline guard.
+
+    The existence-first invariant must hold for every form of value validation,
+    not just coerce + validate_block. Mirrors the round-2 existence-before-coerce
+    test.
+    """
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps({"group": "primary", "credits": 1}),
+    )
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps({"group": "primary", "credits": 1, "notes": "a\nb"}),
+    )
+    assert rc == 1
+    assert "already present" in out.lower()
+    assert "newline" not in out.lower()
+
+
+def test_set_block_rejects_required_fields_set_to_null(sandbox):
+    """JSON null for a required field must be a hard validation error.
+
+    Pre-existing engine quirk: validate_block only enforced required+non-null
+    for date fields, so {group: null, credits: null} silently produced a
+    fully-null block on disk. set-block (and any future full-block writer like
+    merge) needs the engine to reject this for every required type.
+    """
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps({"group": None, "credits": None}),
+    )
+    assert rc == 1
+    assert "null" in out.lower()
+    assert "INVALID CPE.GROUP" in out
+    assert "INVALID CPE.CREDITS" in out
+
+
 def test_update_nested_field_rejects_unknown_path(sandbox):
     """update-nested-field rejects a block/field the schema does not declare."""
     out, _, rc = sandbox.run("update-nested-field", "2025-02-conference-talk", "ptr.bogus", "x")

@@ -150,6 +150,28 @@ def test_validate_block_nullable_date_accepts_null(schema):
     assert issues == []
 
 
+def test_validate_block_flags_required_enum_null(schema):
+    """A required enum field set to null is rejected (was silently accepted)."""
+    issues = validate_block(schema.block("cpe"), {"group": None, "credits": 1})
+    assert any("INVALID CPE.GROUP" in i and "null" in i.lower() for i in issues)
+
+
+def test_validate_block_flags_required_int_null(schema):
+    """A required int field set to null is rejected."""
+    issues = validate_block(schema.block("cpe"), {"group": "general", "credits": None})
+    assert any("INVALID CPE.CREDITS" in i and "null" in i.lower() for i in issues)
+
+
+def test_validate_block_accepts_optional_field_null(schema):
+    """A non-required field set to null is still treated as 'not set'."""
+    # cpe.domain is type=string and not required; null must remain accepted.
+    issues = validate_block(
+        schema.block("cpe"),
+        {"group": "general", "credits": 1, "domain": None},
+    )
+    assert issues == []
+
+
 def test_validate_block_flags_bad_date(schema):
     """A non-ISO date string is flagged."""
     issues = validate_block(

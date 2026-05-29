@@ -1659,34 +1659,36 @@ def cmd_set_block(ctx: Context, args: list[str]) -> int:
         print(f"ERROR: unknown field(s) for block '{block_name}': {unknown}")
         return 1
 
-    # Reject newline-containing string-bearing values: yaml_quote emits a
-    # single-quoted scalar that can't carry a raw LF, so the splice would
-    # corrupt the file. Covers text, string, and (defensively) enum.
-    for fdef in block_def.fields:
-        if fdef.type in ("text", "string", "enum") and isinstance(block_data.get(fdef.name), str):
-            if "\n" in block_data[fdef.name] or "\r" in block_data[fdef.name]:
-                print(
-                    f"ERROR: field '{fdef.name}' contains a newline; "
-                    f"multi-line values are not supported by set-block "
-                    f"(write the entry's description instead)"
-                )
-                return 1
-
     lines = read_lines(ctx.paths.activities)
     start, end = find_entry_line_range(lines, entry_id)
     if start is None:
         print(f"ERROR: entry '{entry_id}' not found")
         return 1
 
-    # Existence check BEFORE coerce + schema validation: a user who runs
+    # Existence check BEFORE every form of value validation: a user who runs
     # set-block on an entry that already has the block gets the actionable
-    # error, not a report (from validate or coerce) that turns out to be moot.
+    # error, not a report (from newline / coerce / validate) that turns out
+    # to be moot.
     if _find_entry_field_line(lines, start, end, block_name) is not None:
         print(
             f"ERROR: block '{block_name}' already present on entry '{entry_id}'. "
             f"Use update-nested-field to edit its fields."
         )
         return 1
+
+    # Reject any string value containing a newline, regardless of its declared
+    # schema type. yaml_quote emits a single-quoted scalar that can't carry a
+    # raw LF, so the splice would corrupt the file on the next read. A
+    # type-agnostic guard (any str) closes the entire bug class, including
+    # date / date? values whose ISO regex happily anchors before a trailing LF.
+    for fname, val in block_data.items():
+        if isinstance(val, str) and ("\n" in val or "\r" in val):
+            print(
+                f"ERROR: field '{fname}' contains a newline; "
+                f"multi-line values are not supported by set-block "
+                f"(write the entry's description instead)"
+            )
+            return 1
 
     # Coerce stringy primitives (int, bool, date) to their native types before
     # validation, so e.g. {"credits": "08"} becomes int 8 and round-trips as a
