@@ -491,6 +491,25 @@ def librarian_update_block_field(
 
 
 @mcp.tool()
+def librarian_set_block(entry_id: str, block: str, fields_json: str, session_label: str) -> str:
+    """Add a schema block to an existing entry.
+
+    ``fields_json`` is a JSON object of field values for the block (e.g.
+    ``{"group": "primary", "credits": 10}``). The block must be declared by
+    the active schema and must not already be present on the entry; the full
+    block is validated atomically before the write. To edit an existing
+    block's fields, use ``librarian_update_block_field``.
+    """
+    label = _validate_label(session_label)
+    return _out(
+        _run_cli(
+            ["set-block", entry_id, block, "--json", fields_json],
+            extra_env={"LIBRARIAN_SESSION_LABEL": label},
+        )
+    )
+
+
+@mcp.tool()
 def librarian_add_tags(entry_id: str, tags: list[str], session_label: str) -> str:
     """Add tags to an entry (idempotent — duplicates are no-ops)."""
     label = _validate_label(session_label)
@@ -533,10 +552,24 @@ def librarian_remove_docs(entry_id: str, doc: str, session_label: str) -> str:
 
 
 @mcp.tool()
-def librarian_delete(entry_id: str, session_label: str, confirm: bool = False) -> str:
-    """Delete an entry. Requires confirm=True; otherwise returns a dry-run preview."""
+def librarian_delete(
+    entry_id: str,
+    session_label: str,
+    confirm: bool = False,
+    repoint_to: str | None = None,
+) -> str:
+    """Delete an entry. Requires confirm=True; otherwise returns a dry-run preview.
+
+    ``repoint_to``, if set, rewrites every backticked or plain-text reference
+    to ``entry_id`` to point at that target id before the source is removed —
+    so the delete does not leave dangling cross-references behind.
+    """
     label = _validate_label(session_label)
-    args = ["delete", entry_id] + (["--confirm"] if confirm else [])
+    args = ["delete", entry_id]
+    if repoint_to:
+        args += ["--repoint-to", repoint_to]
+    if confirm:
+        args.append("--confirm")
     return _out(_run_cli(args, extra_env={"LIBRARIAN_SESSION_LABEL": label}))
 
 
@@ -550,6 +583,45 @@ def librarian_rename_id(old_id: str, new_id: str, session_label: str) -> str:
     return _out(
         _run_cli(["rename-id", old_id, new_id], extra_env={"LIBRARIAN_SESSION_LABEL": label})
     )
+
+
+@mcp.tool()
+def librarian_merge(
+    source_ids: list[str],
+    target_id: str,
+    session_label: str,
+    confirm: bool = False,
+    on_block_conflict: str = "abort",
+    with_provenance: bool = True,
+    append_sources: bool = False,
+) -> str:
+    """Merge one or more source entries into a target, atomically.
+
+    Tags and docs are unioned onto the target (de-duplicated, order-stable).
+    Schema blocks the target lacks are carried over from sources; same-block
+    conflicts respect ``on_block_conflict`` (``abort`` / ``keep-target`` /
+    ``keep-source``; default ``abort``). Every backticked or plain-text
+    reference to each source id is repointed to the target before the source
+    entries are deleted, so the merge does not leave dangling cross-references.
+
+    By default the target's description stays as-is and source descriptions
+    are returned in the dry-run output for manual folding via
+    ``librarian_update_description`` (description merging is editorial).
+    Set ``append_sources=True`` to append each source's description verbatim
+    under a ``## From <source-id>`` plain-text header in the target's
+    literal-block description (a mechanical fold for callers who want it).
+    """
+    label = _validate_label(session_label)
+    args = ["merge", *source_ids, "--into", target_id]
+    if on_block_conflict and on_block_conflict != "abort":
+        args += ["--on-block-conflict", on_block_conflict]
+    if append_sources:
+        args.append("--append-sources")
+    if not with_provenance:
+        args.append("--no-provenance")
+    if confirm:
+        args.append("--confirm")
+    return _out(_run_cli(args, extra_env={"LIBRARIAN_SESSION_LABEL": label}))
 
 
 # =============================================================================

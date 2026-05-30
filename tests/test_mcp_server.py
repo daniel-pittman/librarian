@@ -86,6 +86,123 @@ def test_out_surfaces_stderr_on_failure():
     assert mcp_server._out({"ok": False, "stdout": "", "stderr": "boom"}) == "ERROR: boom"
 
 
+def test_merge_tool_translates_to_cli(monkeypatch):
+    """librarian_merge forwards source_ids, --into, conflict policy, and flags."""
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        captured["env"] = kw.get("extra_env")
+        return {"ok": True, "stdout": "merged\n", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    mcp_server.librarian_merge(
+        source_ids=["2026-09-s1", "2026-09-s2"],
+        target_id="2026-09-tgt",
+        session_label="mcp:test",
+        confirm=True,
+        on_block_conflict="keep-target",
+        with_provenance=False,
+    )
+    assert captured["args"] == [
+        "merge",
+        "2026-09-s1",
+        "2026-09-s2",
+        "--into",
+        "2026-09-tgt",
+        "--on-block-conflict",
+        "keep-target",
+        "--no-provenance",
+        "--confirm",
+    ]
+    assert captured["env"] == {"LIBRARIAN_SESSION_LABEL": "mcp:test"}
+
+
+def test_merge_tool_defaults_translate_minimally(monkeypatch):
+    """Default args (abort + with provenance + no confirm) produce a minimal argv."""
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        return {"ok": True, "stdout": "", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    mcp_server.librarian_merge(source_ids=["s"], target_id="t", session_label="mcp:test")
+    assert captured["args"] == ["merge", "s", "--into", "t"]
+
+
+def test_delete_tool_forwards_repoint_to_flag(monkeypatch):
+    """librarian_delete forwards (entry_id, --repoint-to, target, --confirm) correctly.
+
+    Pins the CLI/MCP parity invariant for the new --repoint-to flag.
+    """
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        captured["env"] = kw.get("extra_env")
+        return {"ok": True, "stdout": "deleted\n", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    mcp_server.librarian_delete(
+        entry_id="2026-09-source",
+        session_label="mcp:test",
+        confirm=True,
+        repoint_to="2026-09-target",
+    )
+    assert captured["args"] == [
+        "delete",
+        "2026-09-source",
+        "--repoint-to",
+        "2026-09-target",
+        "--confirm",
+    ]
+    assert captured["env"] == {"LIBRARIAN_SESSION_LABEL": "mcp:test"}
+
+
+def test_delete_tool_without_repoint_to(monkeypatch):
+    """librarian_delete without repoint_to forwards the basic delete shape."""
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        return {"ok": True, "stdout": "", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    mcp_server.librarian_delete(entry_id="2026-09-x", session_label="mcp:test")
+    assert captured["args"] == ["delete", "2026-09-x"]
+
+
+def test_set_block_tool_translates_to_cli(monkeypatch):
+    """librarian_set_block forwards (entry_id, block, fields_json) to the CLI.
+
+    Project invariant: every new flag/command exists on both the CLI and the
+    MCP server with matching behavior.
+    """
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        captured["env"] = kw.get("extra_env")
+        return {"ok": True, "stdout": "ok\n", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    mcp_server.librarian_set_block(
+        entry_id="2026-09-target",
+        block="cpe",
+        fields_json='{"group":"primary","credits":10}',
+        session_label="mcp:test",
+    )
+    assert captured["args"] == [
+        "set-block",
+        "2026-09-target",
+        "cpe",
+        "--json",
+        '{"group":"primary","credits":10}',
+    ]
+    assert captured["env"] == {"LIBRARIAN_SESSION_LABEL": "mcp:test"}
+
+
 def test_env_tool_translates_to_cli(monkeypatch):
     """librarian_env shells out to the `env` CLI command and returns its output."""
     captured = {}

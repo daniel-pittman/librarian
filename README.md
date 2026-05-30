@@ -66,7 +66,9 @@ by a **pluggable schema** you choose. It ships as:
 ## Features
 
 - **Pluggable schema** — structured "blocks" (review classification, credit
-  tracking, ...) are declared in a `schema.yaml`, not hardcoded.
+  tracking, ...) are declared in a `schema.yaml`, not hardcoded. Add a block to
+  an existing entry with `set-block <id> <block> <json>`; the whole block is
+  validated atomically before the write.
 - **Four bundled schemas** — performance review, post-tenure review,
   certification credits, student portfolio.
 - **Full-text and structured search** — `search`, `filter`, `list`, `project`,
@@ -103,7 +105,23 @@ by a **pluggable schema** you choose. It ships as:
   your descriptions and queryable by name or email fragment.
 - **Safe cross-references** — `rename-id` repoints every backticked **and**
   plain-text reference to an entry across the corpus, token-bounded so longer
-  ids aren't matched as substrings.
+  ids aren't matched as substrings. `delete <id> --repoint-to <target>` reuses
+  the same rewriter, so deleting an entry can rewrite its inbound references
+  to a successor in the same call instead of leaving dangling links behind.
+- **Atomic consolidation** — `merge <source-id>... --into <target-id>` folds
+  tags, docs, and missing schema blocks from one or more source entries into
+  a target, repoints every inbound reference, and deletes the sources, all in
+  one locked write. `--on-block-conflict=abort|keep-target|keep-source` chooses
+  how to resolve same-block collisions; `--append-sources` opts into a
+  mechanical fold of each source's description under a `## From <id>` header;
+  `--dry-run` (the default without `--confirm`) prints the full plan plus
+  source descriptions so the caller can fold the prose in by hand via
+  `update-description`.
+- **Cross-process write lock** — every writer (`create`, `delete`, `update-*`,
+  `set-block`, `add-tags`, `remove-tags`, `add-docs`, `remove-docs`,
+  `rename-id`, `merge`, file-inventory writes) takes an exclusive advisory
+  lock around its full read-plan-write transaction, so two concurrent
+  librarian processes serialize cleanly instead of last-writer-wins.
 - **Tag normalization** — `tag-audit` flags case and separator variants of the
   same tag (e.g. `Build-A-Bot` vs `build-a-bot`) so they don't fragment your
   index over time.
@@ -373,8 +391,8 @@ default.
 `validate`, `export`, `project`, `similar`, `contact`, `changes`, `schema`, `env`
 
 **Write:** `create`, `update-field`, `update-description`, `update-notes`,
-`update-nested-field`, `add-tags`, `remove-tags`, `add-docs`, `remove-docs`,
-`delete`, `rename-id`
+`update-nested-field`, `set-block`, `add-tags`, `remove-tags`, `add-docs`,
+`remove-docs`, `delete`, `rename-id`, `merge`
 
 **File inventory:** `file-add`, `file-list`, `file-get`, `file-move`,
 `file-update`, `file-rehash`, `file-search`

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import functools
 import io
 import json
 import os
@@ -64,6 +65,7 @@ from .storage import (
     load_activities,
     read_lines,
     write_lines,
+    write_lock,
     yaml_quote,
 )
 
@@ -105,6 +107,36 @@ def build_context(env: dict[str, str] | None = None) -> Context:
 # =============================================================================
 # Shared helpers
 # =============================================================================
+
+
+def _activities_locked(func):
+    """Take ``write_lock(ctx.paths.activities)`` around the whole command.
+
+    Wraps a writer command so its read-plan-write transaction is exclusive
+    across processes: ``read_lines`` / ``load_activities`` and the eventual
+    ``write_lines`` / ``append_text`` happen under the same fcntl flock, so
+    a concurrent writer cannot clobber a multi-step operation mid-flight.
+    The lock is reentrant within a single thread, so the inner write helpers
+    (which also use ``write_lock``) compose cleanly.
+    """
+
+    @functools.wraps(func)
+    def wrapper(ctx: Context, args: list[str]) -> int:
+        with write_lock(ctx.paths.activities):
+            return func(ctx, args)
+
+    return wrapper
+
+
+def _files_locked(func):
+    """Like :func:`_activities_locked` but for file-inventory writers."""
+
+    @functools.wraps(func)
+    def wrapper(ctx: Context, args: list[str]) -> int:
+        with write_lock(ctx.paths.files):
+            return func(ctx, args)
+
+    return wrapper
 
 
 def _resolve_label(args: list[str], *, required: bool = True) -> str | None:
@@ -941,6 +973,28 @@ def _find_field_line(lines: list[str], start: int, end: int, field: str) -> int 
     return None
 
 
+def _find_entry_field_line(lines: list[str], start: int, end: int, field: str) -> int | None:
+    """Like :func:`_find_field_line` but indent-anchored to entry fields.
+
+    Returns the index of ``<field>:`` only when the line sits at the entry's
+    top-level field indent (the ``- id:`` line's indent plus two). This avoids
+    matches inside a description literal-block body (e.g. prose containing
+    ``docs:`` or a block name), which would otherwise let the caller splice
+    into the middle of the description or refuse a legitimate write.
+    """
+    expected_indent = line_indent(lines[start]) + 2
+    for i in range(start, end):
+        if line_indent(lines[i]) != expected_indent:
+            continue
+        stripped = lines[i].lstrip()
+        # Recognize both `field:` and `field :` (space-before-colon). The
+        # latter is tolerated by find_entry_line_range, so a hand-edited
+        # entry can reach the duplicate-block guard with that form.
+        if stripped.startswith(f"{field}:") or stripped.startswith(f"{field} :"):
+            return i
+    return None
+
+
 # Entry ids must be ledger-safe slugs. The change ledger is space-delimited
 # (``<ts> <op> <id> label=...``), so an id containing whitespace would be
 # truncated to its first token when parsed back — breaking the ledger-derived
@@ -977,6 +1031,109 @@ def _parse_bool(value: object) -> bool:
         if token in _FALSE_TOKENS:
             return False
     raise ValueError(f"expected a boolean (true/false), got {value!r}")
+
+
+def _repoint_references(
+    lines: list[str],
+    old_id: str,
+    new_id: str,
+    *,
+    skip_range: tuple[int, int] | None = None,
+    skip_ranges: list[tuple[int, int]] | None = None,
+) -> int:
+    """Rewrite every cross-reference to ``old_id`` to point at ``new_id``.
+
+    Matches are bounded by id-character lookarounds, so a rewrite of
+    ``ongoing-coi`` leaves ``ongoing-coi-training`` untouched. Catches both
+    backticked refs and plain-text mentions in any text field (description,
+    block notes, etc.). Mutates ``lines`` in place and returns the number of
+    references rewritten.
+
+    ``skip_range`` and ``skip_ranges`` (half-open ``(start, end)`` tuples)
+    name line ranges that are left untouched. ``delete --repoint-to`` passes
+    the single source range so its self-refs can't inflate the count;
+    ``merge`` passes every source range together via ``skip_ranges`` so
+    references that will be deleted in step 6 don't get counted as work
+    done. The two arguments combine — callers may pass either, or both.
+    """
+    pattern = re.compile(rf"(?<![a-z0-9-]){re.escape(old_id)}(?![a-z0-9-])")
+    ranges: list[tuple[int, int]] = []
+    if skip_range is not None:
+        ranges.append(skip_range)
+    if skip_ranges:
+        ranges.extend(skip_ranges)
+    repointed = 0
+    for i, line in enumerate(lines):
+        if any(s <= i < e for s, e in ranges):
+            continue
+        new_line, n = pattern.subn(new_id, line)
+        if n:
+            repointed += n
+            lines[i] = new_line
+    return repointed
+
+
+def _splice_block_into_entry(
+    lines: list[str],
+    start: int,
+    end: int,
+    block_name: str,
+    block_data: dict,
+    block_def,
+    schema_block_names: list[str],
+) -> int:
+    """Render and splice a schema block into a target entry's line range.
+
+    The insertion point preserves the schema-declaration order that
+    ``_render_entry`` establishes at create time: walk schema blocks after
+    ``block_name`` and splice just before the first one already on the entry;
+    fall back to inserting before the ``docs:`` line when no later block
+    exists. Mutates ``lines`` in place; returns the number of lines inserted.
+
+    ``block_def`` may be ``None``, in which case the block is treated as a
+    generic (schema-unknown) block: every ``(key, value)`` pair in
+    ``block_data`` is emitted in dict order using ``_render_generic_scalar``,
+    mirroring the unknown-block path in ``_render_entry``. This is the
+    fall-through ``merge`` uses to carry over source blocks the schema
+    doesn't declare.
+
+    Raises :class:`ValueError` when the ``docs:`` field can't be located
+    (entry malformed). Shared by :func:`cmd_set_block` and :func:`cmd_merge`
+    so any future fix to block insertion lands in both commands.
+    """
+    # Guard the .index() lookup so an unknown (generic) block name doesn't
+    # raise a misleading "'foo' is not in list" error. A generic block has
+    # no later-in-schema neighbor by construction; fall through to docs:.
+    insert_idx = None
+    if block_name in schema_block_names:
+        later_names = schema_block_names[schema_block_names.index(block_name) + 1 :]
+    else:
+        later_names = []
+    for later_name in later_names:
+        candidate = _find_entry_field_line(lines, start, end, later_name)
+        if candidate is not None:
+            insert_idx = candidate
+            break
+    if insert_idx is None:
+        insert_idx = _find_entry_field_line(lines, start, end, "docs")
+    if insert_idx is None:
+        raise ValueError("could not locate insertion point ('docs:' field missing)")
+
+    field_indent = line_indent(lines[insert_idx])
+    sub_indent = field_indent + 2
+    new_lines = [f"{' ' * field_indent}{block_name}:\n"]
+    if block_def is not None:
+        for fdef in block_def.fields:
+            if fdef.name not in block_data:
+                continue
+            rendered = _render_scalar(fdef, block_data[fdef.name])
+            new_lines.append(f"{' ' * sub_indent}{fdef.name}: {rendered}\n")
+    else:
+        for key, value in block_data.items():
+            new_lines.append(f"{' ' * sub_indent}{key}: {_render_generic_scalar(value)}\n")
+
+    lines[insert_idx:insert_idx] = new_lines
+    return len(new_lines)
 
 
 def _scan_list_items(
@@ -1023,6 +1180,7 @@ def _scan_list_items(
     return items, first, last
 
 
+@_activities_locked
 def cmd_create(ctx: Context, args: list[str]) -> int:
     """Create a new entry from JSON on stdin or ``--json``. ``create [--json ...]``
 
@@ -1206,47 +1364,141 @@ def _render_scalar(field, value) -> str:
     if field.type == "int":
         return str(value)
     if field.type == "bool":
-        return "true" if value in (True, "true", "yes", "1") else "false"
+        # Case-insensitive on string input so "TRUE"/"YES"/"True" don't get
+        # silently flipped to false (validate_block already accepts these).
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, str):
+            low = value.strip().lower()
+            if low in ("true", "yes", "1"):
+                return "true"
+            if low in ("false", "no", "0"):
+                return "false"
+            raise ValueError(f"'{value}' is not a boolean for field '{field.name}'")
+        raise ValueError(f"'{value!r}' is not a boolean for field '{field.name}'")
     return yaml_quote(str(value))
 
 
 def _render_generic_scalar(value) -> str:
-    """Render an unknown-block scalar value for YAML output."""
+    """Render an unknown-block field value for YAML output.
+
+    Scalars (None / bool / int / str) are rendered directly. Lists and dicts
+    are serialized with ``yaml.dump`` so the structure round-trips faithfully
+    instead of being stringified into a Python ``repr`` that loads back as a
+    text scalar.
+    """
     if value is None:
         return "null"
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, (list, dict)):
+        return yaml.dump(value, default_flow_style=True).rstrip("\n")
     return yaml_quote(str(value))
 
 
+@_activities_locked
 def cmd_delete(ctx: Context, args: list[str]) -> int:
-    """Delete an entry by id. ``delete <entry-id> [--confirm]`` (dry-run default)."""
+    """Delete an entry by id.
+
+    ``delete <entry-id> [--repoint-to <target-id>] [--confirm]`` (dry-run default).
+
+    With ``--repoint-to <target-id>``, every backticked or plain-text reference
+    to ``<entry-id>`` across other entries is rewritten to point at
+    ``<target-id>`` before the source entry is removed, so a delete no longer
+    leaves dangling cross-references behind. Without it, behavior is unchanged
+    (references are left as-is for the caller to fix).
+    """
     label = _resolve_label(args, required=True)
     if label is None:
         return 1
+    # Pre-screen -h alongside other args, matching set-block's safety pattern.
+    # Safe to compare argv tokens directly here: _is_valid_id forbids entry ids
+    # that start with `-`, so a user can never legitimately name an entry "-h".
+    if ("-h" in args or "--help" in args) and len(args) > 1:
+        print("ERROR: -h/--help must be used alone (no other arguments)")
+        return 2
+    # Bare `delete` (no entry id) is a user error worth distinguishing from
+    # argparse's generic "missing argument" exit code 2.
     if not args:
-        print("Usage: librarian delete <entry-id> --confirm")
+        print(
+            "ERROR: delete requires an entry id (usage: librarian delete <entry-id> [--repoint-to <id>] [--confirm])"
+        )
         return 1
-    entry_id = args[0]
-    confirm = "--confirm" in args
+    parser = argparse.ArgumentParser(prog="librarian delete")
+    parser.add_argument("entry_id")
+    parser.add_argument("--confirm", action="store_true")
+    parser.add_argument(
+        "--repoint-to",
+        dest="repoint_to",
+        help="rewrite inbound references to this id before deleting",
+    )
+    try:
+        parsed = parser.parse_args(args)
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 1
+    entry_id = parsed.entry_id
+    repoint_to = parsed.repoint_to
+
     lines = read_lines(ctx.paths.activities)
     start, end = find_entry_line_range(lines, entry_id)
     if start is None:
         print(f"ERROR: entry '{entry_id}' not found")
         return 1
+
+    # Validate --repoint-to up front so a dry-run with a bad target still errors.
+    if repoint_to is not None:
+        if repoint_to == entry_id:
+            print(f"ERROR: --repoint-to target '{repoint_to}' is the entry being deleted")
+            return 1
+        target_start, _ = find_entry_line_range(lines, repoint_to)
+        if target_start is None:
+            print(f"ERROR: --repoint-to target '{repoint_to}' not found")
+            return 1
+
+    # Count inbound references (outside the source entry's own lines), so the
+    # dry-run preview matches what the ledger will record on confirm.
+    repoint_count = 0
+    if repoint_to is not None:
+        pattern = re.compile(rf"(?<![a-z0-9-]){re.escape(entry_id)}(?![a-z0-9-])")
+        for i, line in enumerate(lines):
+            if start <= i < end:
+                continue
+            repoint_count += len(pattern.findall(line))
+
     print(f"Entry '{entry_id}' spans lines {start + 1}-{end} ({end - start} lines).")
-    if not confirm:
+    if repoint_to is not None:
+        print(f"Would repoint {repoint_count} inbound reference(s) to '{repoint_to}'.")
+    if not parsed.confirm:
         print("\nDry run — pass --confirm to actually delete.")
         return 0
+
+    # Repoint inbound references first (skipping the soon-to-be-deleted source
+    # range so a self-ref in source's own description can't inflate the count),
+    # then remove the source entry's lines. Capture the helper's return value
+    # rather than reusing the dry-run pre-count, so the ledger entry can never
+    # drift from what the helper actually rewrote on disk — merge (PR 3) will
+    # widen this surface, and the pre-count loop wouldn't see those edits.
+    if repoint_to is not None:
+        repoint_count = _repoint_references(lines, entry_id, repoint_to, skip_range=(start, end))
     del lines[start:end]
     write_lines(ctx.paths.activities, lines)
-    append_ledger(ctx.paths.ledger, "delete", entry_id, label, details=f"lines={end - start}")
-    print(f"Deleted entry '{entry_id}' ({end - start} lines removed)")
+    details = f"lines={end - start}"
+    if repoint_to is not None:
+        details += f" repoint-to={repoint_to} refs={repoint_count}"
+    append_ledger(ctx.paths.ledger, "delete", entry_id, label, details=details)
+    if repoint_to is not None:
+        print(
+            f"Deleted entry '{entry_id}' ({end - start} lines removed); "
+            f"{repoint_count} reference(s) repointed to '{repoint_to}'"
+        )
+    else:
+        print(f"Deleted entry '{entry_id}' ({end - start} lines removed)")
     return 0
 
 
+@_activities_locked
 def cmd_update_field(ctx: Context, args: list[str]) -> int:
     """Update a top-level field. ``update-field <id> <field> <value>``
 
@@ -1318,6 +1570,7 @@ def cmd_update_field(ctx: Context, args: list[str]) -> int:
     return 1
 
 
+@_activities_locked
 def cmd_update_description(ctx: Context, args: list[str]) -> int:
     """Replace an entry's description (read from stdin). ``update-description <id>``"""
     label = _resolve_label(args, required=True)
@@ -1402,6 +1655,7 @@ def _scalar_end(lines: list[str], idx: int, key: str, limit: int) -> int:
     return idx + 1
 
 
+@_activities_locked
 def cmd_update_notes(ctx: Context, args: list[str]) -> int:
     """Update a block's notes/text field. ``update-notes <id> [--block B] [--field F]``
 
@@ -1469,6 +1723,7 @@ def cmd_update_notes(ctx: Context, args: list[str]) -> int:
     return 1
 
 
+@_activities_locked
 def cmd_update_nested_field(ctx: Context, args: list[str]) -> int:
     """Update a single schema-block field. ``update-nested-field <id> BLOCK.FIELD VALUE``
 
@@ -1510,12 +1765,14 @@ def cmd_update_nested_field(ctx: Context, args: list[str]) -> int:
         return 1
 
     # Validate the new value in the context of the entry's current block data,
-    # so dependent enums resolve against the live parent value.
+    # so dependent enums resolve against the live parent value. Filter by the
+    # precise `BLOCK.FIELD:` label rather than a bare substring so issues
+    # about unrelated sibling fields don't leak into this update's error path
+    # (a substring like "CATEGORY" would otherwise match "PTR.SUBCATEGORY:").
     block_data = dict(entry.get(block_name) or {})
     block_data[field_name] = coerced
-    issues = [
-        issue for issue in validate_block(block_def, block_data) if field_name.upper() in issue
-    ]
+    label_prefix = f"{block_name.upper()}.{field_name.upper()}:"
+    issues = [issue for issue in validate_block(block_def, block_data) if label_prefix in issue]
     if issues:
         for issue in issues:
             print(f"ERROR: {issue}")
@@ -1572,11 +1829,168 @@ def cmd_update_nested_field(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+@_activities_locked
+def cmd_set_block(ctx: Context, args: list[str]) -> int:
+    """Add a schema block to an existing entry.
+
+    ``set-block <id> <block> [--json <json>]`` (also accepts JSON on stdin).
+    The block must be declared by the active schema and must NOT already be
+    present on the entry (use ``update-nested-field`` to edit existing
+    fields). The supplied JSON object is validated as a complete block
+    against the schema before any write: unknown fields are rejected, and
+    required fields must be present.
+    """
+    label = _resolve_label(args, required=True)
+    if label is None:
+        return 1
+
+    # Reject `-h`/`--help` mixed with positional/`--json` args. argparse
+    # short-circuits on help anywhere in argv and exits 0, which would
+    # otherwise turn `set-block <id> <block> -h ...` into a silent no-op
+    # that returns success without performing the write.
+    if ("-h" in args or "--help" in args) and len(args) > 1:
+        print("ERROR: -h/--help must be used alone (no other arguments)")
+        return 2
+
+    # Accept JSON via --json or stdin (matching cmd_create) so a CLI user can
+    # supply whitespace-sensitive content without losing it to argv joining.
+    parser = argparse.ArgumentParser(prog="librarian set-block")
+    parser.add_argument("entry_id")
+    parser.add_argument("block")
+    parser.add_argument("--json", help="block fields as a JSON string")
+    try:
+        parsed = parser.parse_args(args)
+    except SystemExit as exc:
+        # argparse exits 0 for --help and 2 for a usage error; preserve that
+        # so `set-block -h` (used alone) returns 0 instead of looking like
+        # a failure.
+        return int(exc.code) if isinstance(exc.code, int) else 1
+    entry_id, block_name = parsed.entry_id, parsed.block
+
+    if parsed.json is not None:
+        raw_json = parsed.json
+    elif not sys.stdin.isatty():
+        raw_json = sys.stdin.read()
+    else:
+        print("ERROR: provide block fields with --json '<json>' or pipe JSON on stdin")
+        return 1
+
+    # Distinguish "no schema at all" from "schema present but missing this block"
+    # so the error guides the right fix.
+    if ctx.schema.is_empty:
+        print("ERROR: no schema configured; set-block requires an active schema")
+        return 1
+    block_def = ctx.schema.block(block_name)
+    if block_def is None:
+        print(f"ERROR: block '{block_name}' is not declared by the active schema")
+        return 1
+
+    try:
+        block_data = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        print(f"ERROR: block fields are not valid JSON: {exc}")
+        return 1
+    if not isinstance(block_data, dict):
+        print("ERROR: block fields must be a JSON object")
+        return 1
+    if not block_data:
+        print(f"ERROR: block payload is empty; supply at least one field for '{block_name}'")
+        return 1
+
+    # Reject unknown fields so typos surface immediately, before validation.
+    known_fields = {f.name for f in block_def.fields}
+    unknown = sorted(k for k in block_data if k not in known_fields)
+    if unknown:
+        print(f"ERROR: unknown field(s) for block '{block_name}': {unknown}")
+        return 1
+
+    lines = read_lines(ctx.paths.activities)
+    start, end = find_entry_line_range(lines, entry_id)
+    if start is None:
+        print(f"ERROR: entry '{entry_id}' not found")
+        return 1
+
+    # Existence check BEFORE value-level validation (newline / coerce /
+    # validate_block) so a user who hits set-block on an entry that already
+    # has the block gets the actionable error rather than a value report
+    # that turns out to be moot. Structural-input errors (bad JSON, unknown
+    # fields, empty payload) still fire first, since those have to be sorted
+    # out before existence even matters.
+    if _find_entry_field_line(lines, start, end, block_name) is not None:
+        print(
+            f"ERROR: block '{block_name}' already present on entry '{entry_id}'. "
+            f"Use update-nested-field to edit its fields."
+        )
+        return 1
+
+    # Reject any string value containing a newline, regardless of its declared
+    # schema type. yaml_quote emits a single-quoted scalar that can't carry a
+    # raw LF, so the splice would corrupt the file on the next read. A
+    # type-agnostic guard (any str) closes the entire bug class, including
+    # date / date? values whose ISO regex happily anchors before a trailing LF.
+    for fname, val in block_data.items():
+        if isinstance(val, str) and ("\n" in val or "\r" in val):
+            print(
+                f"ERROR: field '{fname}' contains a newline; "
+                f"multi-line values are not supported by set-block "
+                f"(write the entry's description instead)"
+            )
+            return 1
+
+    # Coerce stringy primitives (int, bool, date) to their native types before
+    # validation, so e.g. {"credits": "08"} becomes int 8 and round-trips as a
+    # number rather than persisting as the string "08". Errors here use the
+    # same INVALID BLOCK.FIELD shape that validate_block uses, for consistency.
+    for fdef in block_def.fields:
+        raw = block_data.get(fdef.name)
+        if isinstance(raw, str) and fdef.type in ("int", "bool", "date", "date?"):
+            try:
+                block_data[fdef.name] = coerce_value(fdef, raw)
+            except ValueError as exc:
+                print(f"ERROR: INVALID {block_name.upper()}.{fdef.name.upper()}: {exc}")
+                return 1
+
+    # Validate the entire block atomically (catches missing required fields,
+    # bad enum values, dependent-enum mismatches, etc.).
+    issues = validate_block(block_def, block_data)
+    if issues:
+        for issue in issues:
+            print(f"ERROR: {issue}")
+        return 1
+
+    # Splice the rendered block into the entry via the shared helper (also
+    # used by merge). Schema-declaration order is preserved for both callers.
+    try:
+        _splice_block_into_entry(
+            lines,
+            start,
+            end,
+            block_name,
+            block_data,
+            block_def,
+            [b.name for b in ctx.schema.blocks],
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc} on '{entry_id}'")
+        return 1
+    write_lines(ctx.paths.activities, lines)
+    append_ledger(
+        ctx.paths.ledger,
+        "set-block",
+        entry_id,
+        label,
+        f"block={block_name} fields={len(block_data)}",
+    )
+    print(f"Added block '{block_name}' to '{entry_id}' with {len(block_data)} field(s)")
+    return 0
+
+
 def _tags_line(lines: list[str], start: int, end: int) -> int | None:
     """Return the index of the ``tags:`` line within an entry."""
     return _find_field_line(lines, start, end, "tags")
 
 
+@_activities_locked
 def cmd_add_tags(ctx: Context, args: list[str]) -> int:
     """Add tags to an entry. ``add-tags <id> <tag> [tag ...]`` (idempotent)."""
     label = _resolve_label(args, required=True)
@@ -1634,6 +2048,7 @@ def cmd_add_tags(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+@_activities_locked
 def cmd_remove_tags(ctx: Context, args: list[str]) -> int:
     """Remove tags from an entry. ``remove-tags <id> <tag> [tag ...]``"""
     label = _resolve_label(args, required=True)
@@ -1666,9 +2081,10 @@ def cmd_remove_tags(ctx: Context, args: list[str]) -> int:
         lines[tags_idx] = f"{indent}tags: [{', '.join(repr(t) for t in remaining)}]\n"
     else:
         items, _, _ = _scan_list_items(lines, tags_idx, end)
-        # Single pass — keeping `to_delete` (line indices) and `removed`
-        # (tag values) in sync via two separate list comprehensions over
-        # `items` would invite drift if the match predicate ever grew.
+        # Build the deletion plan in one pass: keeping `to_delete` (line
+        # indices) and `removed` (tag values) in sync via two separate list
+        # comprehensions over `items` would invite drift if the match
+        # predicate ever grew.
         matches = [(idx, tag) for idx, tag in items if tag in drop]
         to_delete = [idx for idx, _ in matches]
         removed = [tag for _, tag in matches]
@@ -1683,6 +2099,7 @@ def cmd_remove_tags(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+@_activities_locked
 def cmd_add_docs(ctx: Context, args: list[str]) -> int:
     """Add doc references (URLs or ``file:<id>``) to an entry. ``add-docs <id> <doc> ...``"""
     label = _resolve_label(args, required=True)
@@ -1733,6 +2150,7 @@ def cmd_add_docs(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+@_activities_locked
 def cmd_remove_docs(ctx: Context, args: list[str]) -> int:
     """Remove a doc reference from an entry. ``remove-docs <id> <doc>``"""
     label = _resolve_label(args, required=True)
@@ -1760,6 +2178,7 @@ def cmd_remove_docs(ctx: Context, args: list[str]) -> int:
     return 1
 
 
+@_activities_locked
 def cmd_rename_id(ctx: Context, args: list[str]) -> int:
     """Rename an entry id and repoint cross-references. ``rename-id <old> <new>``
 
@@ -1796,20 +2215,679 @@ def cmd_rename_id(ctx: Context, args: list[str]) -> int:
     indent = " " * line_indent(lines[start])
     lines[start] = f"{indent}- id: {new_id}\n"
 
-    # Repoint every cross-reference to the old id, bounded by id-character
-    # lookarounds. This catches both backticked refs (``old-id``) and plain-
-    # text mentions in prose, while leaving longer id-shaped strings that
-    # happen to start with the old id untouched.
-    pattern = re.compile(rf"(?<![a-z0-9-]){re.escape(old_id)}(?![a-z0-9-])")
-    repointed = 0
-    for i, line in enumerate(lines):
-        new_line, n = pattern.subn(new_id, line)
-        if n:
-            repointed += n
-            lines[i] = new_line
+    # Repoint every cross-reference via the shared helper (also used by
+    # delete --repoint-to). The id-character lookarounds keep longer
+    # id-shaped strings that happen to start with old_id untouched.
+    repointed = _repoint_references(lines, old_id, new_id)
     write_lines(ctx.paths.activities, lines)
     append_ledger(ctx.paths.ledger, "rename-id", new_id, label, f"from={old_id} refs={repointed}")
     print(f"Renamed '{old_id}' -> '{new_id}' ({repointed} cross-reference(s) repointed)")
+    return 0
+
+
+@_activities_locked
+def cmd_merge(ctx: Context, args: list[str]) -> int:
+    """Merge source entries into a target, atomically.
+
+    ``merge <source-id> [<source-id> ...] --into <target-id>
+    [--confirm] [--on-block-conflict abort|keep-target|keep-source]
+    [--no-provenance]``
+
+    Tags and docs are unioned onto the target (target's order first, then new
+    items in source order, de-duplicated). Schema blocks the target lacks are
+    carried over from sources; same-block conflicts respect
+    ``--on-block-conflict`` (default ``abort``). Every backticked or
+    plain-text reference to each source id is repointed to the target before
+    the source entries are deleted, so the merge does not leave dangling
+    cross-references. The target's description is kept as-is; source
+    descriptions are printed for the caller to fold in manually with
+    ``update-description`` (description merging is editorial, not mechanical).
+
+    Atomic: the read, plan, validate, and write all happen in memory before
+    a single ``write_lines`` call. Any failure (validation, conflict abort,
+    missing field) returns without touching the file.
+    """
+    label = _resolve_label(args, required=True)
+    if label is None:
+        return 1
+    if ("-h" in args or "--help" in args) and len(args) > 1:
+        print("ERROR: -h/--help must be used alone (no other arguments)")
+        return 2
+
+    parser = argparse.ArgumentParser(prog="librarian merge")
+    parser.add_argument("source_ids", nargs="+", help="entry id(s) to merge")
+    parser.add_argument("--into", required=True, dest="target_id", help="target entry id")
+    parser.add_argument("--confirm", action="store_true")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="preview only (the default until --confirm is passed); overrides --confirm",
+    )
+    parser.add_argument(
+        "--on-block-conflict",
+        choices=["abort", "keep-target", "keep-source"],
+        default="abort",
+        dest="on_conflict",
+    )
+    parser.add_argument(
+        "--no-provenance",
+        action="store_true",
+        help="omit the plain-text 'Consolidates former entries: ...' note",
+    )
+    parser.add_argument(
+        "--append-sources",
+        action="store_true",
+        help=(
+            "append each source's description under a `## From <id>` header "
+            "in the target's literal-block description (opt-in; off by default "
+            "since description merging is editorial)"
+        ),
+    )
+    try:
+        parsed = parser.parse_args(args)
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 1
+
+    # --dry-run wins over --confirm so the README's "dry-run is the default
+    # until --confirm" wording holds and an explicit --dry-run is honored.
+    if parsed.dry_run:
+        parsed.confirm = False
+
+    target_id = parsed.target_id
+    on_conflict = parsed.on_conflict
+    with_provenance = not parsed.no_provenance
+    append_sources = parsed.append_sources
+
+    # De-dup sources; skip self-merges silently.
+    source_ids: list[str] = []
+    seen_sources: set[str] = set()
+    for sid in parsed.source_ids:
+        if sid == target_id or sid in seen_sources:
+            continue
+        source_ids.append(sid)
+        seen_sources.add(sid)
+    if not source_ids:
+        print(
+            f"ERROR: no sources to merge (target '{target_id}' was the only "
+            f"id supplied, or all sources were duplicates)"
+        )
+        return 1
+
+    # Load activities (parsed) to compute the plan from data.
+    _, activities = load_activities(ctx.paths.activities)
+    by_id = {e.get("id"): e for e in activities}
+
+    if target_id not in by_id:
+        print(f"ERROR: target entry '{target_id}' not found")
+        return 1
+    missing = [sid for sid in source_ids if sid not in by_id]
+    if missing:
+        print(f"ERROR: source entries not found: {missing}")
+        return 1
+
+    target = by_id[target_id]
+    sources = [by_id[sid] for sid in source_ids]
+
+    # Tags union: target's order first, then new tags in source-order.
+    seen_tags = set(target.get("tags") or [])
+    new_tags: list[str] = []
+    for s in sources:
+        for tag in s.get("tags") or []:
+            if tag not in seen_tags:
+                new_tags.append(tag)
+                seen_tags.add(tag)
+
+    # Docs union: same shape.
+    seen_docs = set(target.get("docs") or [])
+    new_docs: list[str] = []
+    for s in sources:
+        for doc in s.get("docs") or []:
+            if doc not in seen_docs:
+                new_docs.append(doc)
+                seen_docs.add(doc)
+
+    # Block plan. Source blocks classify as carry-over (target lacks it),
+    # conflict (both have it), or duplicate-source (a later source also has
+    # the same block another source already supplied — first wins, the rest
+    # are surfaced in the plan so the user can see what got dropped).
+    # Both schema-declared blocks and generic / non-schema blocks are
+    # considered: a source block the schema doesn't declare still represents
+    # real data the user provided, and silently dropping it would be the
+    # same data-loss bug as missing a schema block.
+    schema_known_names = {b.name for b in ctx.schema.blocks}
+    _core_keys_for_merge = {
+        "id",
+        "date",
+        "end_date",
+        "title",
+        "description",
+        "tags",
+        "docs",
+        "docs_optional",
+    }
+
+    def _source_block_names(entry: dict) -> list[str]:
+        """Return the entry's block keys (schema-declared first, then generic),
+        skipping core fields and non-mapping values."""
+        out = [b.name for b in ctx.schema.blocks if b.name in entry]
+        for key, value in entry.items():
+            if (
+                key not in _core_keys_for_merge
+                and key not in schema_known_names
+                and isinstance(value, dict)
+            ):
+                out.append(key)
+        return out
+
+    # Refuse to merge a source carrying top-level non-core, non-block keys
+    # whose values aren't mappings (list, scalar). The merge has no safe way
+    # to fold those into the target (no schema definition, no shape rule),
+    # and silently deleting them with the source is the same data-loss class
+    # that round-1 #2 set out to eliminate. The user is told exactly which
+    # keys are blocking so they can edit the source first.
+    non_carryable: list[tuple[str, str]] = []
+    for s in sources:
+        sid = s.get("id")
+        for key, value in s.items():
+            if key in _core_keys_for_merge or key in schema_known_names:
+                continue
+            if isinstance(value, dict):
+                continue
+            non_carryable.append((sid, key))
+    if non_carryable:
+        print("ERROR: source(s) have top-level non-block fields that merge cannot safely carry:")
+        for sid, key in non_carryable:
+            print(f"  '{sid}': '{key}'")
+        print(
+            "Fold the values into target's description (or convert each key "
+            "to a schema-declared block) before merging."
+        )
+        return 1
+
+    target_block_names = set(_source_block_names(target))
+    blocks_to_carry: dict[str, tuple[str, dict]] = {}
+    conflicts: list[tuple[str, str]] = []
+    dropped_first_wins: list[tuple[str, str]] = []
+    for s in sources:
+        sid = s.get("id")
+        for bn in _source_block_names(s):
+            if bn in target_block_names:
+                conflicts.append((bn, sid))
+                continue
+            if bn in blocks_to_carry:
+                dropped_first_wins.append((bn, sid))
+                continue
+            blocks_to_carry[bn] = (sid, s[bn])
+
+    # Apply on-block-conflict policy.
+    dropped_for_keep_target: list[tuple[str, str]] = []
+    replaced_target_blocks: list[tuple[str, str]] = []
+    if conflicts:
+        if on_conflict == "abort":
+            print("ERROR: source(s) carry block(s) that already exist on the target:")
+            for bn, sid in conflicts:
+                print(f"  block '{bn}' from source '{sid}' conflicts with target's '{bn}'")
+            print(
+                "Pass --on-block-conflict keep-target (drop source's block) "
+                "or keep-source (replace target's block) to resolve."
+            )
+            return 1
+        if on_conflict == "keep-target":
+            dropped_for_keep_target = list(conflicts)
+        else:  # keep-source: first conflicting source wins
+            seen_replace: set[str] = set()
+            for bn, sid in conflicts:
+                if bn not in seen_replace:
+                    blocks_to_carry[bn] = (sid, by_id[sid][bn])
+                    replaced_target_blocks.append((bn, sid))
+                    seen_replace.add(bn)
+                else:
+                    dropped_first_wins.append((bn, sid))
+
+    # Validate every carried-over SCHEMA-DECLARED block. Generic blocks have no
+    # schema definition, so they're carried over by structure without typed
+    # validation (matching _render_entry's generic-block path).
+    for bn, (sid, block_data) in blocks_to_carry.items():
+        block_def = ctx.schema.block(bn)
+        if block_def is None:
+            continue
+        issues = validate_block(block_def, block_data)
+        if issues:
+            print(f"ERROR: block '{bn}' carried from source '{sid}' fails schema validation:")
+            for issue in issues:
+                print(f"  {issue}")
+            return 1
+
+    # Read lines so we can compute repoint counts for the preview. Guard
+    # against any source id that load_activities saw but find_entry_line_range
+    # can't locate (file changed between load and read, malformed range, etc.)
+    # so the count loop doesn't crash with TypeError on (None, None) unpack.
+    lines = read_lines(ctx.paths.activities)
+    source_ranges: dict[str, tuple[int, int]] = {}
+    for sid in source_ids:
+        s_start, s_end = find_entry_line_range(lines, sid)
+        if s_start is None:
+            print(
+                f"ERROR: source '{sid}' present in loaded data but not locatable "
+                f"in the activities file (concurrent edit?); aborting without write"
+            )
+            return 1
+        source_ranges[sid] = (s_start, s_end)
+    all_source_ranges = list(source_ranges.values())
+
+    # Target's own range is also excluded from step 1's repoint. Plain-text
+    # prose mentions of source ids inside the target's description / notes
+    # (e.g. "originally tracked under source-a") would otherwise be silently
+    # rewritten to self-references that the dangling-ref scanner skips
+    # (scan_dangling_refs treats self-refs as not-dangling), making the
+    # rewrite invisible after the fact. Backticked mentions inside the same
+    # range ARE rewritten by the focused pass at step 1b; carried block
+    # content is rewritten in step 2's per-block pre-splice walk.
+    t_pre_start, t_pre_end = find_entry_line_range(lines, target_id)
+    if t_pre_start is not None:
+        repoint_skip_ranges = all_source_ranges + [(t_pre_start, t_pre_end)]
+    else:
+        repoint_skip_ranges = all_source_ranges
+
+    # Pre-count inbound refs per source, excluding source ranges + target's
+    # range so the preview matches what step 1's rewrite will actually do.
+    repoint_counts: dict[str, int] = {}
+    for sid in source_ids:
+        pattern = re.compile(rf"(?<![a-z0-9-]){re.escape(sid)}(?![a-z0-9-])")
+        n = 0
+        for i, line in enumerate(lines):
+            if any(s <= i < e for s, e in repoint_skip_ranges):
+                continue
+            n += len(pattern.findall(line))
+        repoint_counts[sid] = n
+
+    # Print the plan.
+    print(f"Merge plan: {len(source_ids)} source(s) -> '{target_id}'")
+    print(f"  Sources: {', '.join(source_ids)}")
+    print(f"  Tags to add: {len(new_tags)}" + (f" ({new_tags})" if new_tags else ""))
+    print(f"  Docs to add: {len(new_docs)}")
+    if blocks_to_carry:
+        print(
+            "  Blocks to carry over: "
+            + ", ".join(f"{bn} from {sid}" for bn, (sid, _) in blocks_to_carry.items())
+        )
+    if replaced_target_blocks:
+        print(
+            "  Target blocks replaced (--on-block-conflict keep-source): "
+            + ", ".join(f"{bn} <- {sid}" for bn, sid in replaced_target_blocks)
+        )
+    if dropped_for_keep_target:
+        print(
+            "  Source blocks dropped (--on-block-conflict keep-target): "
+            + ", ".join(f"{bn} from {sid}" for bn, sid in dropped_for_keep_target)
+        )
+    if dropped_first_wins:
+        print(
+            "  Duplicate-source blocks dropped (first source wins): "
+            + ", ".join(f"{bn} from {sid}" for bn, sid in dropped_first_wins)
+        )
+    print("  Inbound references to repoint:")
+    for sid in source_ids:
+        print(f"    {sid}: {repoint_counts[sid]}")
+
+    print("\nSource descriptions (fold what you want into the target via update-description):")
+    print("---")
+    for s in sources:
+        sid = s.get("id")
+        print(f"## From {sid}")
+        print((s.get("description") or "").strip())
+        print()
+    print("---")
+
+    if not parsed.confirm:
+        print("\nDry run — pass --confirm to actually merge.")
+        return 0
+
+    # --- Execute (all mutations on `lines` in memory; one write at the end) ---
+
+    schema_block_names = [b.name for b in ctx.schema.blocks]
+
+    # 1. Repoint references for each source. Excluding ALL source ranges (not
+    #    just the source being processed) from each repoint avoids counting
+    #    work whose effect is undone at step 6 when those ranges are deleted.
+    #    Capture each return value so the ledger refs= number can never drift
+    #    from what the helper actually wrote — PR #16's review lesson.
+    actual_repoint_total = 0
+    for sid in source_ids:
+        actual_repoint_total += _repoint_references(
+            lines, sid, target_id, skip_ranges=repoint_skip_ranges
+        )
+
+    # 1b. The target's own range was skipped so PLAIN-text prose mentions of
+    #     source ids in target's description (e.g. "Originally tracked under
+    #     source-a") stay as the user wrote them. But BACKTICKED mentions
+    #     inside the target are deliberate live cross-references and would
+    #     dangle once the source is deleted; rewrite just those.
+    if t_pre_start is not None:
+        t_lo, t_hi = find_entry_line_range(lines, target_id)
+        if t_lo is not None:
+            for sid in source_ids:
+                backtick_pattern = re.compile(rf"`{re.escape(sid)}`")
+                replacement = f"`{target_id}`"
+                for i in range(t_lo, t_hi):
+                    new_line, n = backtick_pattern.subn(replacement, lines[i])
+                    if n:
+                        lines[i] = new_line
+                        actual_repoint_total += n
+
+    # 2. Carry blocks onto the target. For keep-source we may have to delete
+    #    the target's existing block first; re-locate target's range before
+    #    each splice because splices shift line indices below the target.
+    #    _splice_block_into_entry's block_def=None path renders generic
+    #    (schema-unknown) blocks, mirroring _render_entry's generic-block
+    #    path; that's how a source block the schema doesn't declare is still
+    #    carried over rather than silently dropped.
+    #
+    #    Before each splice, rewrite source-id mentions inside the carried
+    #    block's string values to target_id — those mentions came from inside
+    #    a source range step 1 skipped, so the line-level repoint won't catch
+    #    them. Doing this on the parsed data (not the spliced lines) keeps
+    #    the target's own description prose untouched.
+    id_patterns = {
+        sid: re.compile(rf"(?<![a-z0-9-]){re.escape(sid)}(?![a-z0-9-])") for sid in source_ids
+    }
+
+    def _rewrite_ids(value):
+        """Walk a block's value tree, rewriting source-id mentions in strings.
+        Returns (new_value, count_of_substitutions)."""
+        if isinstance(value, str):
+            count = 0
+            for pattern in id_patterns.values():
+                value, n = pattern.subn(target_id, value)
+                count += n
+            return value, count
+        if isinstance(value, dict):
+            count = 0
+            new = {}
+            for k, v in value.items():
+                new[k], n = _rewrite_ids(v)
+                count += n
+            return new, count
+        if isinstance(value, list):
+            count = 0
+            new = []
+            for v in value:
+                rv, n = _rewrite_ids(v)
+                new.append(rv)
+                count += n
+            return new, count
+        return value, 0
+
+    # Iterate a snapshot of the items so the per-iteration value rewrite isn't
+    # mutating a live view of the dict we're walking (the value-only mutation
+    # is safe on CPython today, but the snapshot keeps the pattern explicit).
+    for bn, (_sid, block_data) in list(blocks_to_carry.items()):
+        rewritten_block, n = _rewrite_ids(block_data)
+        actual_repoint_total += n
+        blocks_to_carry[bn] = (_sid, rewritten_block)
+        block_data = rewritten_block
+        t_start, t_end = find_entry_line_range(lines, target_id)
+        existing_idx = _find_entry_field_line(lines, t_start, t_end, bn)
+        if existing_idx is not None:
+            block_indent = line_indent(lines[existing_idx])
+            block_end = t_end
+            # The terminator must be an actual entry-field line (or the next
+            # entry's `- id:` line), not a flush-left comment inside the block.
+            # Comments and blanks are skipped; otherwise a hand-edited block
+            # with a stray `# comment` inside would cause keep-source to
+            # delete only its prefix and leave stale fields behind.
+            for i in range(existing_idx + 1, t_end):
+                stripped = lines[i].strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                indent_here = line_indent(lines[i])
+                if indent_here > block_indent:
+                    continue  # still inside the block (child line)
+                # At indent <= block_indent: either the next field at entry-field
+                # indent (== block_indent), or the next entry's `- id:` line.
+                block_end = i
+                break
+            del lines[existing_idx:block_end]
+            t_start, t_end = find_entry_line_range(lines, target_id)
+        block_def = ctx.schema.block(bn)  # may be None (generic block)
+        try:
+            _splice_block_into_entry(
+                lines, t_start, t_end, bn, block_data, block_def, schema_block_names
+            )
+        except ValueError as exc:
+            print(f"ERROR: {exc} on '{target_id}'")
+            return 1
+
+    # (No separate "step 2b" loop is needed any more: the pre-splice rewrite
+    # at step 2's top scoped the carried-block-content fix to the block's own
+    # data, leaving the target's existing description prose untouched.)
+
+    # 3. Union tags into target's tags list. Handle inline + multi-line, the
+    #    same shapes cmd_add_tags supports, so a hand-edited target survives.
+    if new_tags:
+        t_start, t_end = find_entry_line_range(lines, target_id)
+        tags_idx = _find_entry_field_line(lines, t_start, t_end, "tags")
+        if tags_idx is None:
+            print(f"ERROR: tags: field missing on '{target_id}'")
+            return 1
+        content = lines[tags_idx].split("tags:", 1)[1].strip()
+        indent = " " * line_indent(lines[tags_idx])
+        if content.startswith("[") and content != "[]":
+            # Parse with yaml.safe_load so embedded commas (rare for tags but
+            # the same code path serves docs below where URLs commonly carry
+            # commas) and mixed quote styles round-trip safely; render with
+            # yaml_quote which produces valid YAML escapes (vs. Python repr,
+            # which emits backslash escapes that single-quoted YAML rejects).
+            try:
+                parsed_inline = yaml.safe_load(content) or []
+            except yaml.YAMLError:
+                parsed_inline = []
+            existing_inline = [str(t) for t in parsed_inline] + list(new_tags)
+            lines[tags_idx] = (
+                f"{indent}tags: [" + ", ".join(yaml_quote(t) for t in existing_inline) + "]\n"
+            )
+        else:
+            items, first_item_idx, last_item_idx = _scan_list_items(lines, tags_idx, t_end)
+            if content == "[]":
+                lines[tags_idx] = f"{indent}tags:\n"
+            item_indent = (
+                " " * line_indent(lines[first_item_idx])
+                if first_item_idx is not None
+                else indent + "  "
+            )
+            for offset, tag in enumerate(new_tags):
+                lines.insert(last_item_idx + 1 + offset, f"{item_indent}- {tag}\n")
+
+    # 4. Union docs into target's docs list. Handle inline non-empty + empty
+    #    `[]` + multi-line — the same three shapes cmd_add_tags supports —
+    #    so an inline `docs: ["x"]` target doesn't get the new items spliced
+    #    underneath as block-style children, which would produce invalid YAML.
+    if new_docs:
+        t_start, t_end = find_entry_line_range(lines, target_id)
+        docs_idx = _find_entry_field_line(lines, t_start, t_end, "docs")
+        if docs_idx is None:
+            print(f"ERROR: docs: field missing on '{target_id}'")
+            return 1
+        content = lines[docs_idx].split("docs:", 1)[1].strip()
+        indent = " " * line_indent(lines[docs_idx])
+        if content.startswith("[") and content != "[]":
+            try:
+                parsed_inline = yaml.safe_load(content) or []
+            except yaml.YAMLError:
+                parsed_inline = []
+            existing_inline = [str(d) for d in parsed_inline] + list(new_docs)
+            lines[docs_idx] = (
+                f"{indent}docs: [" + ", ".join(yaml_quote(d) for d in existing_inline) + "]\n"
+            )
+        elif content == "[]":
+            lines[docs_idx] = f"{indent}docs:\n"
+            item_indent = indent + "  "
+            for offset, doc in enumerate(new_docs):
+                lines.insert(docs_idx + 1 + offset, f"{item_indent}- {yaml_quote(doc)}\n")
+        else:
+            items, first_item_idx, last_item_idx = _scan_list_items(lines, docs_idx, t_end)
+            item_indent = (
+                " " * line_indent(lines[first_item_idx])
+                if first_item_idx is not None
+                else indent + "  "
+            )
+            for offset, doc in enumerate(new_docs):
+                lines.insert(last_item_idx + 1 + offset, f"{item_indent}- {yaml_quote(doc)}\n")
+
+    # 5. Description-body additions: the provenance one-liner (default on)
+    #    and the optional `--append-sources` full-source fold. Plain text only
+    #    — backticked source ids would trip the validate dangling-ref scanner
+    #    once the source entries are deleted. The target's description MUST
+    #    be a literal-block scalar (`description: |`); refuse on an inline or
+    #    empty scalar because YAML would silently fold an appended line into
+    #    the value rather than treating it as a body line.
+    if with_provenance or append_sources:
+        # Name only the description-body operations that are actually active
+        # so the error advice ("re-run with --no-provenance") doesn't tell a
+        # user who already passed --no-provenance to pass it again.
+        active = []
+        if with_provenance:
+            active.append("provenance note")
+        if append_sources:
+            active.append("--append-sources content")
+        active_label = " + ".join(active)
+        opt_outs = []
+        if with_provenance:
+            opt_outs.append("--no-provenance")
+        if append_sources:
+            opt_outs.append("drop --append-sources")
+        opt_out_advice = " or ".join(opt_outs)
+
+        t_start, t_end = find_entry_line_range(lines, target_id)
+        desc_idx = _find_entry_field_line(lines, t_start, t_end, "description")
+        if desc_idx is None:
+            print(
+                f"ERROR: target '{target_id}' has no description field; cannot "
+                f"add {active_label} (re-run with {opt_out_advice} to skip)"
+            )
+            return 1
+        desc_content = lines[desc_idx].split("description:", 1)[1].strip()
+        if not desc_content:
+            print(
+                f"ERROR: target '{target_id}' has an empty description field; cannot "
+                f"add {active_label} (re-run with {opt_out_advice} to skip)"
+            )
+            return 1
+        if not (desc_content.startswith("|") or desc_content.startswith(">")):
+            print(
+                f"ERROR: target '{target_id}' has an inline description scalar; "
+                f"convert it to a `description: |` literal block (or re-run with "
+                f"{opt_out_advice}) before merging"
+            )
+            return 1
+        desc_indent = line_indent(lines[desc_idx])
+        # Locate the body's end AND derive body_indent from the first non-blank
+        # body line — explicit indent indicators (`|4`) or hand-edits may put
+        # body at deeper than desc_indent + 2, and hard-coding +2 would either
+        # shallow-terminate the literal block (turning the note into an unknown
+        # top-level mapping key) or fold it into the value silently.
+        body_end = t_end
+        body_indent: int | None = None
+        for i in range(desc_idx + 1, t_end):
+            stripped = lines[i].strip()
+            line_idx_indent = line_indent(lines[i])
+            if stripped and line_idx_indent <= desc_indent:
+                body_end = i
+                break
+            if stripped and body_indent is None:
+                body_indent = line_idx_indent
+        if body_indent is None:
+            body_indent = desc_indent + 2
+
+        new_body_lines: list[str] = []
+        if append_sources:
+            # `## From <source-id>` header — plain text so backticks don't
+            # trip the dangling-ref scanner after the source is deleted.
+            # Each source body has any BACKTICKED reference to ANY source
+            # (including the source's own self-mentions) rewritten to
+            # target_id before splicing, otherwise source A's
+            # `` "see `B-id` for context" `` would survive verbatim into the
+            # target after B is deleted in step 6. Plain-text mentions are
+            # deliberately preserved — see the inner block at the rewrite
+            # call site for why. Use splitlines()
+            # (not split("\n")) so a CRLF-authored description doesn't strand
+            # `\r` characters in the YAML literal block.
+            for s in sources:
+                sid = s.get("id")
+                body = (s.get("description") or "").strip()
+                if not body:
+                    new_body_lines.append(f"{' ' * body_indent}## From {sid}\n")
+                    new_body_lines.append(f"{' ' * body_indent}\n")
+                    continue
+                # Rewrite ALL backticked source-id mentions in the body to
+                # target_id, including the source's own self-backticks. Once
+                # this body lives inside the target's description, every
+                # backticked source id is a reference to an entry that step 6
+                # is about to delete — leaving any of them in place produces
+                # a fresh dangling ref the moment the merge commits.
+                #
+                # Use a backtick-anchored pattern (NOT id_patterns, which is
+                # a word-boundary regex appropriate for block data values).
+                # Word-boundary on prose would silently rewrite plain-text
+                # mentions like "Originally tracked under <sid> before
+                # consolidation" — fabricating a historical claim the user
+                # didn't write.
+                for other_sid in source_ids:
+                    body, n = re.subn(rf"`{re.escape(other_sid)}`", f"`{target_id}`", body)
+                    actual_repoint_total += n
+                new_body_lines.append(f"{' ' * body_indent}## From {sid}\n")
+                for line in body.splitlines():
+                    new_body_lines.append(f"{' ' * body_indent}{line}\n")
+                new_body_lines.append(f"{' ' * body_indent}\n")
+        if with_provenance:
+            new_body_lines.append(
+                f"{' ' * body_indent}Consolidates former entries: {', '.join(source_ids)}.\n"
+            )
+        lines[body_end:body_end] = new_body_lines
+
+    # 6. Delete source entries in descending order so earlier source ranges
+    #    stay valid as later ones are removed.
+    final_source_ranges: list[tuple[int, int]] = []
+    for sid in source_ids:
+        s_start, s_end = find_entry_line_range(lines, sid)
+        if s_start is not None:
+            final_source_ranges.append((s_start, s_end))
+    for s_start, s_end in sorted(final_source_ranges, key=lambda r: r[0], reverse=True):
+        del lines[s_start:s_end]
+
+    # 7. Single write + single ledger entry. The details string distinguishes
+    #    carried / replaced / dropped block decisions so the audit trail
+    #    records what actually happened, not just what was carried.
+    write_lines(ctx.paths.activities, lines)
+    block_decisions: list[str] = []
+    carried_only = [
+        bn
+        for bn in blocks_to_carry.keys()
+        if (bn, blocks_to_carry[bn][0]) not in replaced_target_blocks
+    ]
+    if carried_only:
+        block_decisions.append("carried:" + ",".join(carried_only))
+    if replaced_target_blocks:
+        block_decisions.append("replaced:" + ",".join(bn for bn, _ in replaced_target_blocks))
+    if dropped_for_keep_target:
+        block_decisions.append(
+            "dropped-keep-target:" + ",".join(bn for bn, _ in dropped_for_keep_target)
+        )
+    if dropped_first_wins:
+        block_decisions.append("dropped-first-wins:" + ",".join(bn for bn, _ in dropped_first_wins))
+    blocks_repr = "|".join(block_decisions) if block_decisions else "none"
+    details = (
+        f"sources={','.join(source_ids)} "
+        f"blocks={blocks_repr} "
+        f"tags={len(new_tags)} docs={len(new_docs)} "
+        f"refs={actual_repoint_total}"
+    )
+    append_ledger(ctx.paths.ledger, "merge", target_id, label, details=details)
+    print(
+        f"Merged {len(source_ids)} source(s) into '{target_id}' "
+        f"({actual_repoint_total} reference(s) repointed; "
+        f"{len(new_tags)} tag(s) + {len(new_docs)} doc(s) added)"
+    )
     return 0
 
 
@@ -1834,6 +2912,7 @@ def _print_resolved_file_refs(ctx: Context, entry: dict) -> None:
     print("---")
 
 
+@_files_locked
 def cmd_file_add(ctx: Context, args: list[str]) -> int:
     """Register a file in the inventory. ``file-add <path> --category C --title T``"""
     label = _resolve_label(args, required=True)
@@ -1974,6 +3053,7 @@ def cmd_file_get(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+@_files_locked
 def cmd_file_move(ctx: Context, args: list[str]) -> int:
     """Move a registered file on disk and update its inventory path. ``file-move <id> <path>``"""
     label = _resolve_label(args, required=True)
@@ -2009,6 +3089,7 @@ def cmd_file_move(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+@_files_locked
 def cmd_file_update(ctx: Context, args: list[str]) -> int:
     """Update a file's category/title/description. ``file-update <id> [--title ...]``"""
     label = _resolve_label(args, required=True)
@@ -2046,6 +3127,7 @@ def cmd_file_update(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+@_files_locked
 def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
     """Recompute sha256 for one file or the whole inventory. ``file-rehash <id>|--all``"""
     label = _resolve_label(args, required=True)
@@ -2243,11 +3325,13 @@ COMMANDS = {
     "update-description": cmd_update_description,
     "update-notes": cmd_update_notes,
     "update-nested-field": cmd_update_nested_field,
+    "set-block": cmd_set_block,
     "add-tags": cmd_add_tags,
     "remove-tags": cmd_remove_tags,
     "add-docs": cmd_add_docs,
     "remove-docs": cmd_remove_docs,
     "rename-id": cmd_rename_id,
+    "merge": cmd_merge,
     # file inventory
     "file-add": cmd_file_add,
     "file-list": cmd_file_list,

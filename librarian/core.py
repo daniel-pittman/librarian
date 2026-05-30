@@ -194,6 +194,53 @@ def tag_kernel(tag: str) -> str:
 _BACKTICKED_RE = re.compile(r"`([a-z0-9][a-z0-9-]+[a-z0-9])`")
 _HAS_DIGIT_RE = re.compile(r"\d")
 
+# Phrases that mark a following backticked id as deliberately historical, not a
+# live cross-reference. The scanner skips such mentions even when the id has
+# been renamed away or consolidated under a merge, so prose like "Originally
+# tracked under `2024-foo`" or "Consolidates `2023-bar`" doesn't surface as a
+# DANGLING REF after the fact. Matched within a ~200-char window preceding the
+# backtick to keep historical context tied to its own sentence.
+_HISTORICAL_PHRASES_RE = re.compile(
+    r"\b(?:"
+    # Each historical word must be followed by a context verb to count, so a
+    # bare "previously discussed" or "formerly common practice" cannot
+    # blanket-suppress an unrelated dangling ref in the same window.
+    r"originally\s+(?:tracked|known\s+as|named\s+as|filed\s+under|recorded\s+as|stored\s+as|logged\s+as)|"
+    r"previously\s+(?:tracked|known\s+as|named\s+as|filed\s+under|recorded\s+as)|"
+    r"formerly\s+(?:tracked|known\s+as|named\s+as|filed\s+under)|"
+    r"consolidat\w*\s+(?:from|under|into)|"
+    r"merged\s+(?:from|into)|"
+    r"renamed\s+(?:from|to)|"
+    r"superseded\s+by"
+    # The bare alternatives "old id", "former(ly) id" and "was named/known as"
+    # used to live here. They were too generic — "old id-pattern matched" or
+    # "the function was named" would silently suppress a real dangling ref in
+    # the same window. Authors with a history note can still get coverage via
+    # the explicit forms above ("previously named", "formerly tracked", etc.).
+    r")\b",
+    re.IGNORECASE,
+)
+_HISTORICAL_WINDOW = 200  # chars before the backtick we'll scan for a phrase
+
+# Matches the LAST sentence/clause boundary in a window of preceding text.
+# A boundary is either:
+#
+#   * a sentence terminator (. ! ?) with three-or-more alphabetic characters
+#     immediately before it AND an uppercase letter starting the next word,
+#     OR
+#   * a paragraph break (blank line).
+#
+# The three-alpha lookbehind plus uppercase lookahead is a heuristic: it
+# matches real sentence ends ("X was stored as CSV. See") but skips the
+# common false-positive abbreviations and number patterns ("4.2", "Mr.",
+# "Dr.", "e.g.", "v1.0"). It still false-positives on full-word abbreviations
+# like "etc." or "Mrs." followed by a proper noun, but those collisions are
+# rare in librarian description prose. A bare ``\n`` is deliberately NOT a
+# boundary: YAML literal-block descriptions routinely wrap prose mid-clause.
+# The ``(?s).*`` prefix is greedy + DOTALL so ``re.search`` returns the LAST
+# boundary.
+_LAST_SENTENCE_BREAK_RE = re.compile(r"(?s).*((?<=[A-Za-z]{3})[.!?]\s+(?=[A-Z])|\n\s*\n)")
+
 
 def scan_dangling_refs(
     activities: list[dict],
@@ -239,8 +286,39 @@ def scan_dangling_refs(
                 # Skip names known to NOT be entry ids (tags, file ids).
                 if ref in exclude:
                     continue
-                if ref not in ids:
-                    findings.append((eid, ref, label))
+                if ref in ids:
+                    continue
+                # Treat as historical (not dangling) when a phrase like
+                # "Originally tracked under", "Previously known as",
+                # "Consolidated from" appears in the prose preceding the
+                # backtick. Scope: keep the phrase visible only within the
+                # current sentence/clause.
+                #
+                # Step 1 — sentence boundary: trim back to the last
+                # sentence terminator (. ! ? followed by whitespace) or
+                # newline. "X was originally stored as CSV. See `2024-foo`"
+                # — the period closes the prior clause so the phrase no
+                # longer applies to `2024-foo`.
+                #
+                # Step 2 — earlier-backtick clause boundary: when an
+                # earlier closing backtick sits in the window, keep the
+                # phrase visible only if the text between the two
+                # backticks is a list-continuation token (` and `, `, `,
+                # ` or `). Anything else ("`a`, but see also `b`",
+                # "`a`. See also `b`") opens a new clause and the phrase
+                # no longer applies.
+                preceding = text[max(0, match.start() - _HISTORICAL_WINDOW) : match.start()]
+                sentence_break = _LAST_SENTENCE_BREAK_RE.search(preceding)
+                if sentence_break is not None:
+                    preceding = preceding[sentence_break.end() :]
+                last_close_backtick = preceding.rfind("`")
+                if last_close_backtick != -1:
+                    between = preceding[last_close_backtick + 1 :].strip(" \t,")
+                    if between and between.lower() not in ("and", "or", "&"):
+                        preceding = preceding[last_close_backtick + 1 :]
+                if _HISTORICAL_PHRASES_RE.search(preceding):
+                    continue
+                findings.append((eid, ref, label))
     return findings
 
 
