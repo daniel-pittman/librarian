@@ -2803,10 +2803,13 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
         if append_sources:
             # `## From <source-id>` header — plain text so backticks don't
             # trip the dangling-ref scanner after the source is deleted.
-            # Each source body has any backticked or plain-text reference to
-            # ANOTHER source rewritten to target_id before splicing, otherwise
-            # source A's `` "see `B-id` for context" `` would survive verbatim
-            # into the target after B is deleted in step 6. Use splitlines()
+            # Each source body has any BACKTICKED reference to ANY source
+            # (including the source's own self-mentions) rewritten to
+            # target_id before splicing, otherwise source A's
+            # `` "see `B-id` for context" `` would survive verbatim into the
+            # target after B is deleted in step 6. Plain-text mentions are
+            # deliberately preserved — see the inner block at the rewrite
+            # call site for why. Use splitlines()
             # (not split("\n")) so a CRLF-authored description doesn't strand
             # `\r` characters in the YAML literal block.
             for s in sources:

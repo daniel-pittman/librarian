@@ -222,13 +222,17 @@ _HISTORICAL_PHRASES_RE = re.compile(
 )
 _HISTORICAL_WINDOW = 200  # chars before the backtick we'll scan for a phrase
 
-# Matches the LAST sentence/clause boundary in a window of preceding text,
-# anchored by ``rfind``-equivalent semantics via ``re.finditer`` + the last
-# hit (``.search`` on a non-anchored pattern returns the FIRST hit, so we
-# build a reversed iterator). A boundary is a sentence terminator (. ! ?)
-# followed by whitespace, or a newline. Used by ``scan_dangling_refs`` to
-# trim the historical-phrase look-back to the current sentence.
-_LAST_SENTENCE_BREAK_RE = re.compile(r"(?s).*([.!?]\s+|\n)")
+# Matches the LAST sentence/clause boundary in a window of preceding text.
+# A boundary is either a sentence terminator (. ! ?) followed by whitespace,
+# or a paragraph break (blank line). A bare ``\n`` is NOT a boundary: YAML
+# literal-block descriptions routinely wrap prose mid-clause across lines, so
+# a description authored as ``Originally tracked\nunder `id`.`` must still
+# be recognized as a historical phrase. The ``(?s).*`` prefix is greedy +
+# DOTALL so ``re.search`` returns the LAST boundary (the regex backtracks
+# until the trailing alternation matches, leaving ``match.end()`` past the
+# final boundary). Used by ``scan_dangling_refs`` to trim the historical-
+# phrase look-back to the current sentence.
+_LAST_SENTENCE_BREAK_RE = re.compile(r"(?s).*([.!?]\s+|\n\s*\n)")
 
 
 def scan_dangling_refs(

@@ -287,6 +287,61 @@ def test_scan_dangling_refs_does_not_suppress_on_bare_originally_stored_or_known
     )
 
 
+def test_scan_dangling_refs_historical_phrase_survives_line_wrap():
+    """A historical phrase that wraps across a single newline (a common
+    YAML literal-block authoring pattern) must still be recognized — the
+    bare ``\\n`` is NOT a sentence boundary, only a paragraph break
+    (``\\n\\s*\\n``) or sentence-terminator-plus-whitespace is.
+
+    Round-6 review finding #1: an earlier fix treated every ``\\n`` as a
+    clause boundary, false-positively flagging the backtick below as
+    dangling because the trim discarded "Originally tracked" on the
+    prior line.
+    """
+    activities = [
+        _entry(
+            "2026-09-wrapped",
+            description="Originally tracked\nunder `2024-legacy-id`.",
+        ),
+        _entry(
+            "2026-09-wrapped-2",
+            description=(
+                "Active record.\n"
+                "Originally tracked under `2024-legacy-id-2` before\n"
+                "the consolidation."
+            ),
+        ),
+    ]
+    ids = {"2026-09-wrapped", "2026-09-wrapped-2"}
+    findings = scan_dangling_refs(activities, ids=ids, text_fields=_DESC)
+    refs = {ref for _, ref, _ in findings}
+    assert "2024-legacy-id" not in refs, (
+        f"line-wrapped historical phrase must still be recognized: {findings}"
+    )
+    assert "2024-legacy-id-2" not in refs, (
+        f"line-wrapped historical phrase must still be recognized: {findings}"
+    )
+
+
+def test_scan_dangling_refs_paragraph_break_still_scopes_phrase():
+    """Round-5's sentence-scope intent (a phrase in a PRIOR sentence does
+    not apply to a backtick in the next) still holds for the paragraph-
+    break variant. ``\\n\\s*\\n`` between an unrelated historical phrase
+    and a later backtick must scope the phrase out."""
+    activities = [
+        _entry(
+            "2026-09-paragraph",
+            description=(
+                "The dataset was originally stored as CSV.\n\n"
+                "See `2024-broken-ref` for migration notes."
+            ),
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-paragraph"}, text_fields=_DESC)
+    refs = {ref for _, ref, _ in findings}
+    assert "2024-broken-ref" in refs, "phrase in a prior paragraph must not suppress dangling ref"
+
+
 def test_scan_dangling_refs_still_skips_originally_stored_as():
     """The tightened ``originally`` branch must still recognize the explicit
     completer forms (``originally stored as``, ``originally known as``,
