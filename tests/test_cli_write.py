@@ -2770,6 +2770,11 @@ def test_concurrent_writers_do_not_clobber_each_other(sandbox):
     """
     import subprocess
     import sys
+    from pathlib import Path
+
+    # Derive the repo root from this test file's location so the test works
+    # on any checkout (local + CI), not a hardcoded developer path.
+    repo_root = Path(__file__).resolve().parent.parent
 
     # Launch N parallel add-tags invocations against the same entry; each adds
     # a distinct tag. All N writes must survive.
@@ -2792,7 +2797,7 @@ def test_concurrent_writers_do_not_clobber_each_other(sandbox):
                     f"concurrent-tag-{i}",
                 ],
                 env=full_env,
-                cwd="/Users/dpittman/git/research/tools/librarian",
+                cwd=str(repo_root),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
