@@ -211,19 +211,21 @@ _HISTORICAL_PHRASES_RE = re.compile(
     # Finite verb forms only (drop the open ``\w*`` quantifier). For the
     # ``from`` direction, accept the phrase anywhere — that prepositional
     # phrase always introduces a former identity. For ``into`` / ``under``,
-    # require the phrase to sit IMMEDIATELY before the backticked id (the
-    # ``(?=\s*$)`` lookahead anchors to end-of-look-back-window; the scanner
-    # passes only the text BEFORE the backtick to ``_HISTORICAL_PHRASES_RE
-    # .search``, so ``$`` is the position just before the backtick).
-    # Generic dev/operations prose like "merged into main last week" or
-    # "consolidation into a single index" doesn't blanket-suppress
-    # unrelated dangling refs (the phrase has prose after it before
-    # reaching the backtick), while "Consolidated into `<old-id>`" /
-    # "Merged into `<old-id>`" historical phrasings ARE recognized.
+    # require the phrase to sit immediately before the backticked id (the
+    # scanner passes only the text BEFORE the backtick to
+    # ``_HISTORICAL_PHRASES_RE.search``, so ``$`` is the position just
+    # before the backtick) OR be followed by an existing backtick-pair +
+    # list-continuation token (``and`` / ``or`` / ``&`` / ``,``) — the
+    # list-continuation arm preserves recognition of "Merged into `a` and
+    # `b`" while still rejecting generic prose like "merged into main last
+    # week" or "consolidation into a single index" (which would have
+    # additional non-backtick prose between the phrase and the next
+    # backticked id).
     r"consolidat(?:e|es|ed|ing)\s+from|"
-    r"consolidat(?:e|es|ed|ing)\s+(?:into|under)(?=\s*$)|"
+    r"consolidat(?:e|es|ed|ing)\s+(?:into|under)"
+    r"(?=\s*(?:$|`[^`]*`\s*(?:and|or|&|,)))|"
     r"merged\s+from|"
-    r"merged\s+into(?=\s*$)|"
+    r"merged\s+into(?=\s*(?:$|`[^`]*`\s*(?:and|or|&|,)))|"
     r"renamed\s+(?:from|to)|"
     r"superseded\s+by"
     # The bare alternatives "old id", "former(ly) id" and "was named/known as"

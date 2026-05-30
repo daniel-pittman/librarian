@@ -17,14 +17,13 @@ digest, and an ``added`` date.
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 
-from .storage import write_lock
+from .storage import atomic_replace, write_lock
 
 # Canonical field order for serialised records — keeps files.yaml diffs stable.
 _FILE_KEY_ORDER = ("id", "path", "category", "title", "description", "sha256", "added")
@@ -52,26 +51,15 @@ def save_files(files_path: Path, records: list[dict]) -> None:
         return out
 
     ordered = [_ordered(r) for r in sorted(records, key=lambda r: r.get("id", ""))]
+    rendered = yaml.dump(
+        {"files": ordered},
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
+        width=120,
+    )
     with write_lock(files_path):
-        files_path.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic from a concurrent reader's POV: write to a sidecar then
-        # ``os.replace`` it over the target. Preserve target mode bits so
-        # a ``chmod 600`` on the inventory survives the round-trip.
-        tmp_path = files_path.with_suffix(files_path.suffix + ".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as fh:
-            yaml.dump(
-                {"files": ordered},
-                fh,
-                default_flow_style=False,
-                allow_unicode=True,
-                sort_keys=False,
-                width=120,
-            )
-        if files_path.exists():
-            import shutil
-
-            shutil.copymode(files_path, tmp_path)
-        os.replace(tmp_path, files_path)
+        atomic_replace(files_path, rendered)
 
 
 def slugify_filename(path: str) -> str:

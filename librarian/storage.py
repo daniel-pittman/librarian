@@ -155,26 +155,48 @@ class write_lock:
         return False  # never suppress exceptions
 
 
-def _atomic_replace(yaml_path: Path, new_content: str) -> None:
+def atomic_replace(yaml_path: Path, new_content: str) -> None:
     """Atomically replace ``yaml_path`` with ``new_content``.
 
     Writes a temp sidecar then ``os.replace`` over the target. Preserves
     the target's existing mode bits when present — ``os.replace`` would
     otherwise adopt the tmp file's umask-default mode and silently revert
     a ``chmod 600`` the user (or downstream packaging) applied for
-    access restriction.
+    access restriction. On failure (write error, copymode error) the
+    temp sidecar is removed so the user doesn't accumulate orphan
+    ``.tmp`` files after an interrupted write.
+
+    Caveats (acknowledged for the multi-user data home case): ``os.replace``
+    swaps the inode, so the file's uid/gid after the write reflect the
+    running process's uid/gid, not the target's pre-write owner. In a
+    shared-data-home deployment (mode 660 service-user file), the first
+    write by a different uid silently rechowns the file. ``shutil.copystat``
+    + ``os.chown`` would close this, but ``chown`` to an arbitrary uid/gid
+    needs ``CAP_CHOWN`` — not assumable. Single-user installations are
+    unaffected.
 
     Caller must hold the resource's :class:`write_lock`.
     """
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as fh:
-        fh.write(new_content)
-    if yaml_path.exists():
-        import shutil
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            fh.write(new_content)
+        if yaml_path.exists():
+            import shutil
 
-        shutil.copymode(yaml_path, tmp_path)
-    os.replace(tmp_path, yaml_path)
+            shutil.copymode(yaml_path, tmp_path)
+        os.replace(tmp_path, yaml_path)
+    except BaseException:
+        # Clean up the orphan sidecar on any failure (write error,
+        # copymode, replace, KeyboardInterrupt) so an interrupted write
+        # doesn't leave the user with a stray ``.tmp`` file and (on first
+        # run) an empty target.
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def write_lines(yaml_path: Path, lines: list[str]) -> None:
@@ -183,7 +205,7 @@ def write_lines(yaml_path: Path, lines: list[str]) -> None:
     Atomic from a concurrent reader's POV via temp+``os.replace``.
     """
     with write_lock(yaml_path):
-        _atomic_replace(yaml_path, "".join(lines))
+        atomic_replace(yaml_path, "".join(lines))
 
 
 def append_text(yaml_path: Path, text: str) -> None:
@@ -199,7 +221,7 @@ def append_text(yaml_path: Path, text: str) -> None:
     """
     with write_lock(yaml_path):
         existing = yaml_path.read_text(encoding="utf-8") if yaml_path.exists() else ""
-        _atomic_replace(yaml_path, existing + text)
+        atomic_replace(yaml_path, existing + text)
 
 
 # ---------------------------------------------------------------------------

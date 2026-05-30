@@ -469,6 +469,37 @@ def test_scan_dangling_refs_consolidated_from_still_recognized():
     assert findings == [], f"historical finite forms wrongly flagged: {findings}"
 
 
+def test_scan_dangling_refs_into_under_list_continuation():
+    """Round-3 review #3: the legitimate historical list ``Merged into
+    `a` and `b``` (or with ``consolidated under`` / ``consolidated into``)
+    must still suppress every backticked id in the list — not just the
+    first. The round-2 ``(?=\\s*$)`` lookahead was strict-end-only and
+    broke list-continuation; round-3 relaxes it to also accept a
+    backtick-pair + continuation token following the phrase.
+    """
+    activities = [
+        _entry(
+            "2026-09-merged-list",
+            description="Merged into `2024-old-a` and `2024-old-b`.",
+        ),
+        _entry(
+            "2026-09-cons-into-list",
+            description="Consolidated into `2024-old-c`, `2024-old-d` and `2024-old-e`.",
+        ),
+        _entry(
+            "2026-09-cons-under-list",
+            description="Consolidated under `2024-old-f` or `2024-old-g`.",
+        ),
+    ]
+    ids = {
+        "2026-09-merged-list",
+        "2026-09-cons-into-list",
+        "2026-09-cons-under-list",
+    }
+    findings = scan_dangling_refs(activities, ids=ids, text_fields=_DESC)
+    assert findings == [], f"historical list-continuation forms wrongly flagged: {findings}"
+
+
 def test_scan_dangling_refs_into_under_with_backtick_recognized():
     """Restored after round-2 review #5: legitimate historical forms
     ``Merged into `<id>``` and ``Consolidated under `<id>``` (where the

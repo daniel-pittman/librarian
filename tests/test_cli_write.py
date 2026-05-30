@@ -3425,19 +3425,15 @@ def test_pure_read_skip_not_triggered_by_arg_value(sandbox):
     assert lock_path.exists()
 
 
-def test_file_rehash_skips_when_path_changed_between_phases(sandbox, tmp_path):
-    """If a concurrent ``file-move`` rewrites a record's path between
-    phase 2 (hash) and phase 3 (apply), we must NOT write the phase-2
-    digest onto the new path. Round-1 review #2.
+def test_file_rehash_reports_missing_without_double_counting(sandbox, tmp_path):
+    """If a registered file's path doesn't exist on disk at rehash time,
+    the rid lands in the ``missing`` bucket — and MUST NOT also appear
+    in the ``added during hashing`` bucket. Round-3 review #1: my
+    earlier round-2 fix counted such rids twice and emitted misleading
+    "rerun to pick them up" advice.
 
-    Simulates the race by manually mutating the file inventory between
-    snapshot capture (via cmd_file_rehash's pre-lock load) and the
-    locked apply. We achieve the same effect by patching the inventory
-    after file-add but before file-rehash.
-
-    v1.7.1 follow-up — round-1 PR #20 #2.
+    v1.7.1 follow-up — round-1 PR #20 #2 + round-3 PR #20 #1 + #10.
     """
-    # Two files registered.
     data_root = sandbox.activities.parent
     f1 = data_root / "rehash-a.txt"
     f2 = data_root / "rehash-b.txt"
@@ -3446,9 +3442,7 @@ def test_file_rehash_skips_when_path_changed_between_phases(sandbox, tmp_path):
     sandbox.run("file-add", "rehash-a.txt", "--category", "evidence", "--title", "A")
     sandbox.run("file-add", "rehash-b.txt", "--category", "evidence", "--title", "B")
 
-    # Capture phase-2 view: paths are ``rehash-a.txt`` and ``rehash-b.txt``.
-    # Now "concurrently" swap the second record's path to a non-existent
-    # path before rehash runs phase 3.
+    # Move rehash-b's path to a non-existent location in the inventory.
     import yaml as _yaml
 
     files_yaml = sandbox.activities.parent / "files.yaml"
@@ -3458,17 +3452,35 @@ def test_file_rehash_skips_when_path_changed_between_phases(sandbox, tmp_path):
             r["path"] = "moved-elsewhere.txt"
     files_yaml.write_text(_yaml.dump(data, default_flow_style=False, sort_keys=False))
 
-    # Now rehash --all. The path-drift check should skip rehash-b rather
-    # than overwrite it with the digest computed for the OLD path.
     out, err, rc = sandbox.run("file-rehash", "--all")
     assert rc == 0, f"file-rehash failed: {err}"
-    # Either skipped or just not rehashed — but specifically: the digest
-    # for rehash-b should NOT equal the digest of the old beta-content
-    # path (since the path changed).
-    # The safer property to assert: rehash-b appears in the path-drift skip
-    # notice the command emits. (Inventory state is also unchanged because
-    # phase 3 chose skip-on-mismatch.)
-    assert "rehash-b" in out, f"expected rehash-b to appear in path-drift skip notice: {out}"
+    # rehash-b appears in the missing-from-disk notice.
+    assert "missing from disk" in out and "rehash-b" in out
+    # ...and MUST NOT also appear in the added-during-hashing notice.
+    assert "added during hashing" not in out, (
+        f"round-3 #1 regression: missing-from-disk rid was double-counted: {out}"
+    )
+
+
+def test_file_rehash_path_drift_check_present():
+    """Direct unit-shape probe of the path-drift branch in
+    ``cmd_file_rehash``. The branch is not directly subprocess-testable
+    because the race requires interleaving between two ``load_files``
+    calls in the same process; we assert here that the code path EXISTS
+    by importing the module-level pattern and confirming the
+    ``skipped_path_drift`` symbol participates in the rehash flow.
+
+    v1.7.1 follow-up — round-3 PR #20 #10 (acknowledging the gap that
+    the prior test asserted the missing-from-disk branch by mistake).
+    """
+    import inspect
+
+    import librarian.cli as _cli
+
+    source = inspect.getsource(_cli.cmd_file_rehash)
+    assert "skipped_path_drift" in source, "cmd_file_rehash must contain the path-drift skip branch"
+    assert "snap_path" in source, "phase 3 must compare snapshot path to current"
+    assert "path changed during" in source, "path-drift notice text must be present"
 
 
 def test_file_rehash_help_short_circuits(sandbox):
@@ -3526,6 +3538,35 @@ def test_append_text_round_trips_parseable_yaml(sandbox):
 
     parsed = _yaml.safe_load(sandbox.activities.read_text())
     assert any(e["id"] == "2026-09-atomic-append" for e in parsed["activities"])
+
+
+def test_label_rejects_flag_as_value(sandbox):
+    """``--label --dry-run`` is a typo (forgot the label string). Without
+    the round-3 fix, ``_resolve_label`` would pop ``--dry-run`` as the
+    label value, drop it from argv, and the write path would run with
+    ``label="--dry-run"`` recorded in the ledger.
+
+    v1.7.1 follow-up — round-3 PR #20 #5.
+    """
+    entry = {
+        "id": "2026-09-bad-label",
+        "date": "2026-09-01",
+        "title": "Bad label probe",
+        "description": "Should be rejected.",
+        "tags": ["probe"],
+    }
+    out, _, rc = sandbox.run(
+        "create",
+        "--label",
+        "--dry-run",
+        "--json",
+        json.dumps(entry),
+        extra_env={"LIBRARIAN_SESSION_LABEL": ""},
+    )
+    assert rc == 1, f"expected rejection of flag-as-label-value: {out}"
+    assert "looks like another flag" in out
+    # The entry must NOT have landed.
+    assert "2026-09-bad-label" not in sandbox.activities.read_text()
 
 
 def test_create_dry_run_without_label_succeeds(sandbox):

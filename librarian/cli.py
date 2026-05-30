@@ -59,7 +59,7 @@ from .paths import LibrarianPaths, resolve_paths
 from .schema import Schema, SchemaError, coerce_value, load_schema, validate_block
 from .storage import (
     append_ledger,
-    append_text,
+    atomic_replace,
     find_entry_line_range,
     line_indent,
     load_activities,
@@ -189,7 +189,23 @@ def _resolve_label(args: list[str], *, required: bool = True) -> str | None:
     if "--label" in args:
         i = args.index("--label")
         if i + 1 < len(args):
-            label = args[i + 1]
+            candidate = args[i + 1]
+            # Reject another flag as the label value. Without this guard a
+            # typo like ``--label --dry-run --json '...'`` silently swallows
+            # ``--dry-run`` as the label, drops it from argv, and the write
+            # path then runs with ``label="--dry-run"`` — completely
+            # defeating the dry-run intent and tagging the ledger with a
+            # bogus label. ``sys.exit(1)`` here (not ``return None``) so the
+            # caller can't accidentally treat the bad-value case as a
+            # missing-label and fall through to a labelless dry-run.
+            if candidate.startswith("-"):
+                print(
+                    f"ERROR: --label requires a value (got '{candidate}', "
+                    f"which looks like another flag). Format: "
+                    f"<context>:<short-purpose>, e.g. 'cli:main-curator'"
+                )
+                sys.exit(1)
+            label = candidate
             args.pop(i + 1)
         args.pop(i)
     if not label:
@@ -1323,9 +1339,11 @@ def cmd_create(ctx: Context, args: list[str]) -> int:
             )
         print()
 
-    # Match the indentation style of existing entries so the appended YAML
-    # stays parseable. If the file already has `- id:` lines, copy their
-    # indent; otherwise default to 2-space (the style of a fresh file).
+    # Pre-render with a tentative indent for the dry-run preview. The
+    # authoritative indent is re-detected INSIDE the lock so a peer
+    # cmd_create that landed an indent-4 entry between our snapshot and
+    # our locked write can't make us emit an indent-2 entry into an
+    # indent-4 file (which would be invalid YAML).
     indent = _detect_entry_indent(ctx.paths)
     yaml_text = _render_entry(ctx, data, indent=indent)
     if parsed.dry_run:
@@ -1335,17 +1353,30 @@ def cmd_create(ctx: Context, args: list[str]) -> int:
 
     # Lock-protected write. Re-load activities to absorb any concurrent
     # additions between the pre-lock scan and now, then re-check id
-    # uniqueness so the append never races into a duplicate.
+    # uniqueness so the append never races into a duplicate, and
+    # re-detect the entry indent so concurrent writes can't cause us to
+    # emit a mixed-indent file.
     with write_lock(ctx.paths.activities):
         _, current = load_activities(ctx.paths.activities)
         if data["id"] in {e.get("id") for e in current}:
             print(f"ERROR: entry with id '{data['id']}' already exists")
             return 1
         ctx.paths.ensure_home()
-        # Ensure the file starts with an `activities:` key on first use.
-        if not ctx.paths.activities.exists():
-            ctx.paths.activities.write_text("activities:\n", encoding="utf-8")
-        append_text(ctx.paths.activities, "\n" + yaml_text)
+        # Re-detect indent inside the lock and re-render the entry if the
+        # detected indent diverged from the pre-lock pass.
+        locked_indent = _detect_entry_indent(ctx.paths)
+        if locked_indent != indent:
+            yaml_text = _render_entry(ctx, data, indent=locked_indent)
+        # Build the final file content atomically: existing-or-fresh
+        # ``activities:`` prefix concatenated with the new entry. Routing
+        # through ``atomic_replace`` closes the round-3 #4 window where a
+        # non-atomic ``Path.write_text("activities:\n")`` first-create
+        # was visible to unlocked readers as a 0-byte file.
+        if ctx.paths.activities.exists():
+            existing_content = ctx.paths.activities.read_text(encoding="utf-8")
+        else:
+            existing_content = "activities:\n"
+        atomic_replace(ctx.paths.activities, existing_content + "\n" + yaml_text)
         append_ledger(
             ctx.paths.ledger, "create", data["id"], label, details=f"tags={len(data['tags'])}"
         )
@@ -3295,8 +3326,10 @@ def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
     # Help / usage short-circuit. Without the decorator wrapper, the
     # ``_is_pure_read_invocation`` skip never runs for this command, so a
     # ``file-rehash --help`` invocation would otherwise fall through to
-    # the id-lookup path and report "file id '--help' not found".
-    if args and args[0] in ("-h", "--help"):
+    # the id-lookup path and report "file id '--help' not found". Scan
+    # the whole argv so ``file-rehash <id> --help`` is also caught (not
+    # just the help-first case).
+    if any(a in ("-h", "--help") for a in args):
         print("Usage: librarian file-rehash <id> | --all")
         print("  Recompute sha256 for one registered file or the whole inventory.")
         return 0
@@ -3338,13 +3371,33 @@ def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
         if not abs_path.exists():
             missing.append(rid)
             continue
-        hash_results[rid] = (rel_path, sha256_of(abs_path))
+        try:
+            sha = sha256_of(abs_path)
+        except (FileNotFoundError, OSError) as exc:
+            # TOCTOU: the file existed at the ``.exists()`` check above but
+            # was removed (or made unreadable) before/during the streaming
+            # hash. Pre-PR the wide files-lock made the window milliseconds;
+            # the lock-scope shrink widens it to potentially minutes for a
+            # large file, so this race is now reachable. Treat as missing
+            # rather than letting the exception bubble up and abandon every
+            # hash already computed for the other records.
+            missing.append(rid)
+            print(
+                f"WARNING: {rid}: file vanished or became unreadable during "
+                f"hashing ({exc.__class__.__name__}); skipping."
+            )
+            continue
+        hash_results[rid] = (rel_path, sha)
 
     # Phase 3 — apply deltas under the lock. Re-load to absorb any concurrent
     # writes that landed during phase 2, then patch in our hashes by id ONLY
     # when the record's path still matches what phase 2 hashed.
     skipped_path_drift: list[str] = []
     added_during_hash: list[str] = []  # records present in phase 3 but not phase 2
+    # ``missing`` captures rids whose path was unreachable during phase 2.
+    # Phase 3 must NOT also flag those rids as "added during hashing" — they
+    # were known at phase 2, just not hashable. Set-membership skip below.
+    missing_set = set(missing)
     with write_lock(ctx.paths.files):
         records = load_files(ctx.paths.files)
         rehashed = 0
@@ -3356,10 +3409,13 @@ def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
             post_lock_ids.add(rid)
             snapshot = hash_results.get(rid)
             if snapshot is None:
-                # Record present at phase 3 but not phase 2: a concurrent
-                # ``file-add`` landed between phases. Track on --all so the
-                # user knows the run was incomplete and reruns.
-                if scope == "--all":
+                # Record present at phase 3 but no entry in hash_results.
+                # Genuinely-new (concurrent file-add) is what we want to
+                # surface to --all. Exclude rids that phase 2 already routed
+                # into ``missing`` (path didn't exist on disk) so the user
+                # doesn't see both "Skipped missing" AND "added during
+                # hashing" for the same id — they're the same record.
+                if scope == "--all" and rid not in missing_set:
                     added_during_hash.append(rid)
                 continue
             snap_path, new_sha = snapshot
@@ -3379,8 +3435,26 @@ def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
             and scope not in post_lock_ids
             and scope not in skipped_path_drift
         )
-        save_files(ctx.paths.files, records)
-        append_ledger(ctx.paths.ledger, "file-rehash", scope, label, f"rehashed={rehashed}")
+        # Skip the inventory rewrite + ledger entry when nothing actually
+        # changed: no new digests written, no path-drift skips, no
+        # vanished id, no concurrent additions. Avoids an unnecessary
+        # mtime bump (wakes sync/watcher tooling) and avoids a misleading
+        # ``rehashed=0`` ledger row indistinguishable from a healthy
+        # no-op.
+        wrote_anything = (
+            rehashed > 0 or skipped_path_drift or added_during_hash or scope_id_vanished
+        )
+        if rehashed > 0:
+            save_files(ctx.paths.files, records)
+        if wrote_anything:
+            detail = f"rehashed={rehashed}"
+            if scope_id_vanished:
+                detail += " vanished=1"
+            if skipped_path_drift:
+                detail += f" path-drift={len(skipped_path_drift)}"
+            if added_during_hash:
+                detail += f" added-during={len(added_during_hash)}"
+            append_ledger(ctx.paths.ledger, "file-rehash", scope, label, detail)
 
     print(f"Rehashed {rehashed} file(s).")
     if missing:
