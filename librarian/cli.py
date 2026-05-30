@@ -109,8 +109,22 @@ def build_context(env: dict[str, str] | None = None) -> Context:
 # =============================================================================
 
 
+def _is_pure_read_invocation(args: list[str]) -> bool:
+    """True when ``args`` clearly won't reach a write path.
+
+    Detects ``-h`` / ``--help`` (argparse short-circuits with a clean exit
+    after printing help) and ``--dry-run`` (writer commands honor this by
+    returning 0 before any mutation). When either is present the lock can
+    be skipped: no write will happen, so a) we don't materialize the
+    ``.lock`` sidecar against a fresh install just to print help, and
+    b) we don't serialize ``--dry-run`` previews behind a concurrent writer.
+    """
+    return "-h" in args or "--help" in args or "--dry-run" in args
+
+
 def _activities_locked(func):
-    """Take ``write_lock(ctx.paths.activities)`` around the whole command.
+    """Take ``write_lock(ctx.paths.activities)`` around the whole command,
+    skipping it for clearly pure-read invocations (``--help`` / ``--dry-run``).
 
     Wraps a writer command so its read-plan-write transaction is exclusive
     across processes: ``read_lines`` / ``load_activities`` and the eventual
@@ -118,10 +132,18 @@ def _activities_locked(func):
     a concurrent writer cannot clobber a multi-step operation mid-flight.
     The lock is reentrant within a single thread, so the inner write helpers
     (which also use ``write_lock``) compose cleanly.
+
+    Pure-read invocations skip the lock entirely (see
+    :func:`_is_pure_read_invocation`). For commands that do expensive work
+    OUTSIDE the lock-critical section (stdin reads, large similarity scans,
+    etc.) prefer dropping the decorator and using explicit ``with
+    write_lock(...):`` around just the read-plan-write phase.
     """
 
     @functools.wraps(func)
     def wrapper(ctx: Context, args: list[str]) -> int:
+        if _is_pure_read_invocation(args):
+            return func(ctx, args)
         with write_lock(ctx.paths.activities):
             return func(ctx, args)
 
@@ -129,10 +151,16 @@ def _activities_locked(func):
 
 
 def _files_locked(func):
-    """Like :func:`_activities_locked` but for file-inventory writers."""
+    """Like :func:`_activities_locked` but for file-inventory writers.
+
+    Same pure-read skip semantics: ``--help`` / ``--dry-run`` invocations
+    do not materialize ``files.yaml.lock``.
+    """
 
     @functools.wraps(func)
     def wrapper(ctx: Context, args: list[str]) -> int:
+        if _is_pure_read_invocation(args):
+            return func(ctx, args)
         with write_lock(ctx.paths.files):
             return func(ctx, args)
 
@@ -1180,13 +1208,19 @@ def _scan_list_items(
     return items, first, last
 
 
-@_activities_locked
 def cmd_create(ctx: Context, args: list[str]) -> int:
     """Create a new entry from JSON on stdin or ``--json``. ``create [--json ...]``
 
     Required fields: ``id``, ``date``, ``title``, ``description``, ``tags``.
     Optional: ``end_date``, ``docs`` and any schema block. Schema blocks present
     in the input are validated before the entry is written.
+
+    NOTE: does NOT use ``@_activities_locked``. The expensive operations —
+    JSON-stdin read and the O(N) fuzzy-similarity scan over every entry —
+    happen OUTSIDE the lock; only the short uniqueness-recheck + append +
+    ledger phase is locked. A concurrent writer can land between the
+    pre-lock fuzzy scan and the locked append; the re-check inside the lock
+    catches a same-id collision and aborts cleanly.
     """
     label = _resolve_label(args, required=True)
     if label is None:
@@ -1226,12 +1260,12 @@ def cmd_create(ctx: Context, args: list[str]) -> int:
             print(f"ERROR: docs_optional {exc}")
             return 1
 
+    # Pre-lock pass — load entries once for fuzzy duplicate warning + block
+    # validation + indent detection + YAML render. None of these mutate.
     _, activities = load_activities(ctx.paths.activities)
-    if data["id"] in {e.get("id") for e in activities}:
-        print(f"ERROR: entry with id '{data['id']}' already exists")
-        return 1
 
-    # Validate any schema blocks present on the new entry.
+    # Schema-block validation uses only ctx.schema, not the loaded entries,
+    # so it's safe outside the lock.
     for block in ctx.schema.blocks:
         if block.name in data:
             block_issues = validate_block(block, data[block.name] or {})
@@ -1241,7 +1275,14 @@ def cmd_create(ctx: Context, args: list[str]) -> int:
                     print(f"  {issue}")
                 return 1
 
-    # Fuzzy duplicate warning (non-blocking).
+    # Pre-lock id-existence check: short-circuits the common case ("already
+    # tracked") without taking the lock. The post-lock re-check is the
+    # authoritative one and handles the concurrent-writer race.
+    if data["id"] in {e.get("id") for e in activities}:
+        print(f"ERROR: entry with id '{data['id']}' already exists")
+        return 1
+
+    # Fuzzy duplicate warning (non-blocking; informational only).
     query_text = f"{data.get('title', '')} {data.get('description', '')}"
     similar = sorted(
         ((best_similarity(query_text, e), e) for e in activities),
@@ -1267,14 +1308,22 @@ def cmd_create(ctx: Context, args: list[str]) -> int:
         print(yaml_text)
         return 0
 
-    ctx.paths.ensure_home()
-    # Ensure the file starts with an `activities:` key on first use.
-    if not ctx.paths.activities.exists():
-        ctx.paths.activities.write_text("activities:\n", encoding="utf-8")
-    append_text(ctx.paths.activities, "\n" + yaml_text)
-    append_ledger(
-        ctx.paths.ledger, "create", data["id"], label, details=f"tags={len(data['tags'])}"
-    )
+    # Lock-protected write. Re-load activities to absorb any concurrent
+    # additions between the pre-lock scan and now, then re-check id
+    # uniqueness so the append never races into a duplicate.
+    with write_lock(ctx.paths.activities):
+        _, current = load_activities(ctx.paths.activities)
+        if data["id"] in {e.get("id") for e in current}:
+            print(f"ERROR: entry with id '{data['id']}' already exists")
+            return 1
+        ctx.paths.ensure_home()
+        # Ensure the file starts with an `activities:` key on first use.
+        if not ctx.paths.activities.exists():
+            ctx.paths.activities.write_text("activities:\n", encoding="utf-8")
+        append_text(ctx.paths.activities, "\n" + yaml_text)
+        append_ledger(
+            ctx.paths.ledger, "create", data["id"], label, details=f"tags={len(data['tags'])}"
+        )
     print(f"Created entry '{data['id']}'")
     return 0
 
@@ -2489,8 +2538,9 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
     else:
         repoint_skip_ranges = all_source_ranges
 
-    # Pre-count inbound refs per source, excluding source ranges + target's
-    # range so the preview matches what step 1's rewrite will actually do.
+    # Pre-count inbound refs per source for step 1 (cross-file repoint),
+    # excluding source ranges + target's range so this matches what
+    # ``_repoint_references`` will actually do.
     repoint_counts: dict[str, int] = {}
     for sid in source_ids:
         pattern = re.compile(rf"(?<![a-z0-9-]){re.escape(sid)}(?![a-z0-9-])")
@@ -2500,6 +2550,55 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
                 continue
             n += len(pattern.findall(line))
         repoint_counts[sid] = n
+
+    # Also account for the rewrites that happen INSIDE the merge's own
+    # steps so the preview total matches the ledger total. PR #16's review
+    # lesson: preview must equal what the commit actually records. Steps
+    # counted here:
+    #   1b. Backticked source-id mentions inside the target's range that
+    #       get rewritten to `target_id` after step 1 skipped that range.
+    #   2.  ``_rewrite_ids`` traversal over every carried block's string
+    #       values, rewriting plain-text source-id mentions inside the
+    #       block data to ``target_id``.
+    #   5.  When ``--append-sources`` is on, every backticked source-id
+    #       mention (including self) in each source's description gets
+    #       rewritten to ``target_id`` before splicing.
+    preview_extra = 0
+    if t_pre_start is not None:
+        for sid in source_ids:
+            bt_pat = re.compile(rf"`{re.escape(sid)}`")
+            for i in range(t_pre_start, t_pre_end):
+                preview_extra += len(bt_pat.findall(lines[i]))
+
+    def _count_ids_in_value(value) -> int:
+        """Recursively count plain-text source-id mentions in a block value
+        (the same word-boundary pattern ``_rewrite_ids`` uses at exec
+        time)."""
+        if isinstance(value, str):
+            total = 0
+            for sid in source_ids:
+                wp = re.compile(rf"(?<![a-z0-9-]){re.escape(sid)}(?![a-z0-9-])")
+                total += len(wp.findall(value))
+            return total
+        if isinstance(value, dict):
+            return sum(_count_ids_in_value(v) for v in value.values())
+        if isinstance(value, list):
+            return sum(_count_ids_in_value(v) for v in value)
+        return 0
+
+    for _bn, (_sid, block_data) in blocks_to_carry.items():
+        preview_extra += _count_ids_in_value(block_data)
+
+    if append_sources:
+        for s in sources:
+            body = (s.get("description") or "").strip()
+            if not body:
+                continue
+            for sid in source_ids:
+                bt_pat = re.compile(rf"`{re.escape(sid)}`")
+                preview_extra += len(bt_pat.findall(body))
+
+    preview_total = sum(repoint_counts.values()) + preview_extra
 
     # Print the plan.
     print(f"Merge plan: {len(source_ids)} source(s) -> '{target_id}'")
@@ -2526,11 +2625,20 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
             "  Duplicate-source blocks dropped (first source wins): "
             + ", ".join(f"{bn} from {sid}" for bn, sid in dropped_first_wins)
         )
-    print("  Inbound references to repoint:")
+    print("  Inbound references to repoint (step 1, cross-file):")
     for sid in source_ids:
         print(f"    {sid}: {repoint_counts[sid]}")
+    if preview_extra:
+        print(f"  Additional internal rewrites (steps 1b/2/5): {preview_extra}")
+    print(f"  Total references to repoint (matches ledger): {preview_total}")
 
-    print("\nSource descriptions (fold what you want into the target via update-description):")
+    # Source-description preview. When --append-sources is on the merge will
+    # fold these in automatically; otherwise the user picks what to carry by
+    # hand via update-description.
+    if append_sources:
+        print("\nSource descriptions (will be appended automatically by --append-sources):")
+    else:
+        print("\nSource descriptions (fold what you want into the target via update-description):")
     print("---")
     for s in sources:
         sid = s.get("id")
@@ -2618,14 +2726,12 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
             return new, count
         return value, 0
 
-    # Iterate a snapshot of the items so the per-iteration value rewrite isn't
-    # mutating a live view of the dict we're walking (the value-only mutation
-    # is safe on CPython today, but the snapshot keeps the pattern explicit).
-    for bn, (_sid, block_data) in list(blocks_to_carry.items()):
-        rewritten_block, n = _rewrite_ids(block_data)
+    for bn, (_sid, block_data) in blocks_to_carry.items():
+        # _rewrite_ids returns a fresh tree; no mutation of the dict during
+        # iteration. `block_data` is the only downstream reader so we don't
+        # need to write the rewritten value back into blocks_to_carry.
+        block_data, n = _rewrite_ids(block_data)
         actual_repoint_total += n
-        blocks_to_carry[bn] = (_sid, rewritten_block)
-        block_data = rewritten_block
         t_start, t_end = find_entry_line_range(lines, target_id)
         existing_idx = _find_entry_field_line(lines, t_start, t_end, bn)
         if existing_idx is not None:
@@ -2756,7 +2862,11 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
             opt_outs.append("--no-provenance")
         if append_sources:
             opt_outs.append("drop --append-sources")
-        opt_out_advice = " or ".join(opt_outs)
+        # Join with `and` (not `or`) when BOTH opt-outs are needed: dropping
+        # either alone still leaves the other active, which keeps the same
+        # shape check failing. The user has to drop every active body-write
+        # to skip it.
+        opt_out_advice = " and ".join(opt_outs) if len(opt_outs) > 1 else opt_outs[0]
 
         t_start, t_end = find_entry_line_range(lines, target_id)
         desc_idx = _find_entry_field_line(lines, t_start, t_end, "description")
@@ -2778,6 +2888,21 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
                 f"ERROR: target '{target_id}' has an inline description scalar; "
                 f"convert it to a `description: |` literal block (or re-run with "
                 f"{opt_out_advice}) before merging"
+            )
+            return 1
+        # Folded-scalar (`>`) gates `--append-sources` specifically. YAML's
+        # folded form collapses single newlines into spaces, so every appended
+        # `## From <sid>` header, body line, and blank separator would fuse
+        # into one paragraph. The provenance one-liner alone is bounded (it's
+        # one line, folded becomes a space) so `>` + only-provenance is OK;
+        # `>` + append-sources is not.
+        if append_sources and desc_content.startswith(">"):
+            print(
+                f"ERROR: target '{target_id}' uses a folded-scalar description "
+                f"(`description: >`); --append-sources requires a literal-block "
+                f"scalar (`description: |`) because YAML folds newlines into "
+                f"spaces and would mangle the appended source bodies. "
+                f"Convert the target to `|` first, or drop --append-sources."
             )
             return 1
         desc_indent = line_indent(lines[desc_idx])
@@ -2816,7 +2941,10 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
                 sid = s.get("id")
                 body = (s.get("description") or "").strip()
                 if not body:
-                    new_body_lines.append(f"{' ' * body_indent}## From {sid}\n")
+                    # Empty source body: emit a marker so a reader doesn't see
+                    # a bare `## From <sid>` header followed by a blank line
+                    # and wonder whether content went missing.
+                    new_body_lines.append(f"{' ' * body_indent}## From {sid} (no description)\n")
                     new_body_lines.append(f"{' ' * body_indent}\n")
                     continue
                 # Rewrite ALL backticked source-id mentions in the body to
@@ -3127,34 +3255,61 @@ def cmd_file_update(ctx: Context, args: list[str]) -> int:
     return 0
 
 
-@_files_locked
 def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
-    """Recompute sha256 for one file or the whole inventory. ``file-rehash <id>|--all``"""
+    """Recompute sha256 for one file or the whole inventory. ``file-rehash <id>|--all``
+
+    NOTE: this command intentionally does NOT use ``@_files_locked``. SHA-256
+    on a large registered file (videos, archives, datasets) can take seconds
+    to minutes, and holding the cross-process flock through the whole loop
+    would serialize every concurrent ``file-*`` writer behind it. Instead the
+    expensive hashing runs OUTSIDE the lock, and the lock is taken only for
+    the short load/apply-deltas/save phase. If a concurrent writer adds or
+    moves a record while hashing is in progress, this run silently skips
+    that change (its id won't be in our ``hash_results`` dict); the user can
+    rerun to pick it up.
+    """
     label = _resolve_label(args, required=True)
     if label is None:
         return 1
     if not args:
         print("Usage: librarian file-rehash <id> | --all")
         return 1
-    records = load_files(ctx.paths.files)
+
+    # Phase 1 — snapshot inventory and resolve targets (no lock; pure read).
+    snapshot = load_files(ctx.paths.files)
     if args[0] == "--all":
-        targets, scope = records, "--all"
+        targets, scope = snapshot, "--all"
     else:
         scope = args[0]
-        targets = [r for r in records if r.get("id") == scope]
+        targets = [r for r in snapshot if r.get("id") == scope]
         if not targets:
             print(f"ERROR: file id '{scope}' not found")
             return 1
-    rehashed, missing = 0, []
+
+    # Phase 2 — compute hashes OUTSIDE the lock. This is the expensive part.
+    hash_results: dict[str, str] = {}  # file_id -> new_sha256
+    missing: list[str] = []
     for record in targets:
+        rid = record.get("id")
         abs_path = ctx.paths.root / record.get("path", "")
         if not abs_path.exists():
-            missing.append(record.get("id"))
+            missing.append(rid)
             continue
-        record["sha256"] = sha256_of(abs_path)
-        rehashed += 1
-    save_files(ctx.paths.files, records)
-    append_ledger(ctx.paths.ledger, "file-rehash", scope, label, f"rehashed={rehashed}")
+        hash_results[rid] = sha256_of(abs_path)
+
+    # Phase 3 — apply deltas under the lock. Re-load to absorb any concurrent
+    # writes that landed during phase 2, then patch in our hashes by id.
+    with write_lock(ctx.paths.files):
+        records = load_files(ctx.paths.files)
+        rehashed = 0
+        for record in records:
+            new_sha = hash_results.get(record.get("id"))
+            if new_sha is not None:
+                record["sha256"] = new_sha
+                rehashed += 1
+        save_files(ctx.paths.files, records)
+        append_ledger(ctx.paths.ledger, "file-rehash", scope, label, f"rehashed={rehashed}")
+
     print(f"Rehashed {rehashed} file(s).")
     if missing:
         print(f"Skipped {len(missing)} missing from disk: {', '.join(missing)}")

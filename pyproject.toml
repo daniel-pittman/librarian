@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "librarian-tracker"
-version = "1.7.0"
+version = "1.7.1"
 description = "A local-first, plain-text activity tracker with a pluggable schema and an MCP server."
 readme = "README.md"
 requires-python = ">=3.10"

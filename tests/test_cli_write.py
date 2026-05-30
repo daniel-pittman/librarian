@@ -3205,3 +3205,201 @@ def test_search_changed_since_invalid(sandbox):
     out, _, rc = sandbox.run("search", "anything", "--changed-since", "nope")
     assert rc == 1
     assert "cannot parse" in out.lower()
+
+
+# =============================================================================
+# v1.7.1 follow-ups
+# =============================================================================
+
+
+def test_merge_rejects_folded_scalar_when_append_sources(sandbox):
+    """A folded-scalar (``description: >``) target must be rejected when
+    --append-sources is on. YAML's folded form collapses newlines into
+    spaces and would mangle the appended source bodies.
+
+    v1.7.1 follow-up (round-4 review #5).
+    """
+    target = _merge_target_entry()
+    sandbox.run("create", stdin=json.dumps(target))
+    # Hand-edit the persisted YAML to convert TARGET's description to a
+    # folded scalar. The CLI always writes `|` so this can only happen via
+    # hand-edit; that's exactly the case we need to catch. Locate the
+    # target's id-line first so we don't accidentally rewrite a fixture
+    # entry's description.
+    text = sandbox.activities.read_text()
+    target_idx = text.find("- id: 2026-09-mg-target")
+    assert target_idx != -1, "target entry missing from activities yaml"
+    desc_idx = text.find("description: |", target_idx)
+    assert desc_idx != -1, "target description not in literal-block form"
+    text = text[:desc_idx] + "description: >" + text[desc_idx + len("description: |") :]
+    sandbox.activities.write_text(text)
+
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--append-sources",
+        "--confirm",
+    )
+    assert rc == 1, f"merge should reject folded scalar + append-sources: {out}"
+    assert "folded" in out.lower()
+    assert "literal-block" in out.lower() or "`|`" in out
+
+
+def test_merge_opt_out_advice_uses_and_when_both_flags(sandbox):
+    """When BOTH provenance and append-sources are active and the target's
+    description is in an unsupported shape, the error must advise dropping
+    BOTH (joined by ``and``) — dropping either alone leaves the other
+    active, which keeps the same shape check failing.
+
+    v1.7.1 follow-up (round-4 review #3).
+    """
+    # Create a target with inline description (rejected by the gate).
+    target = _merge_target_entry(description="Inline description")
+    sandbox.run("create", stdin=json.dumps(target))
+    text = sandbox.activities.read_text()
+    # Force inline scalar (CLI defaults to literal-block).
+    text = text.replace(
+        "description: |\n      Inline description\n", "description: 'Inline description'\n", 1
+    )
+    sandbox.activities.write_text(text)
+
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--append-sources",  # provenance is on by default
+        "--confirm",
+    )
+    assert rc == 1
+    # Both opt-outs joined by ``and``, not ``or``.
+    assert "--no-provenance and drop --append-sources" in out or (
+        "and" in out and "or" not in out.split("re-run with")[1].split(")")[0]
+    ), f"expected `and` joiner when both flags active; got: {out}"
+
+
+def test_merge_preview_total_matches_ledger(sandbox):
+    """The dry-run preview's `Total references to repoint` line must match
+    the post-confirm ledger's `refs=` count. Pre-PR the preview counted only
+    step 1 (cross-file repoints); the ledger accumulated steps 1 + 1b + 2 + 5.
+
+    v1.7.1 follow-up (round-4 review #2).
+    """
+    target = _merge_target_entry(
+        description=(
+            "Original target description. See `2026-09-mg-source` for the prior write-up."
+        ),
+    )
+    sandbox.run("create", stdin=json.dumps(target))
+    src = _merge_source_entry(description="See `2026-09-mg-source` for self-context.")
+    sandbox.run("create", stdin=json.dumps(src))
+
+    # Dry run — captures preview total.
+    preview_out, _, _ = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--append-sources",
+    )
+    # Extract the preview total from the displayed line.
+    preview_total = None
+    for line in preview_out.splitlines():
+        if "Total references to repoint" in line:
+            preview_total = int(line.rsplit(":", 1)[1].strip())
+            break
+    assert preview_total is not None, f"preview total line missing: {preview_out}"
+
+    # Confirm — captures the ledger refs= count.
+    confirm_out, _, _ = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--append-sources",
+        "--confirm",
+    )
+    # Pull the count from the success line, e.g. "(3 reference(s) repointed; ...)".
+    import re as _re
+
+    m = _re.search(r"\((\d+)\s+reference\(s\)\s+repointed", confirm_out)
+    assert m, f"ledger refs= count missing: {confirm_out}"
+    actual_total = int(m.group(1))
+
+    assert preview_total == actual_total, (
+        f"preview shown {preview_total}, ledger recorded {actual_total}"
+    )
+
+
+def test_file_rehash_does_not_use_decorator_lock(sandbox, tmp_path):
+    """file-rehash --all should still work after the lock-scope refactor
+    that pulled the SHA-256 loop out of the lock.
+
+    v1.7.1 follow-up (round-7 review #3).
+    """
+    # Place a real file under the data root.
+    data_root = sandbox.activities.parent
+    test_file = data_root / "rehash-test.txt"
+    test_file.write_text("hello rehash")
+    out, _, rc = sandbox.run(
+        "file-add",
+        "rehash-test.txt",
+        "--category",
+        "evidence",
+        "--title",
+        "Rehash test",
+    )
+    assert rc == 0, f"file-add failed: {out}"
+    # Mutate the file so the sha changes.
+    test_file.write_text("hello rehash, modified")
+    out, _, rc = sandbox.run("file-rehash", "--all")
+    assert rc == 0, f"file-rehash failed: {out}"
+    # Fixture has pre-existing inventory; just verify the command succeeded
+    # and rehashed at least the one we added.
+    assert "Rehashed" in out and "file(s)" in out
+
+
+def test_help_does_not_materialize_lockfile(sandbox):
+    """``librarian <writer-command> --help`` must NOT create the
+    activities.yaml.lock sidecar against a fresh data home — the lock is
+    only needed for actual writes.
+
+    v1.7.1 follow-up (round-3 #5 / round-4 #1).
+    """
+    lock_path = sandbox.activities.with_suffix(".yaml.lock")
+    if lock_path.exists():
+        lock_path.unlink()
+    out, _, rc = sandbox.run("delete", "--help")
+    assert rc == 0
+    assert not lock_path.exists(), (
+        f"--help materialized lockfile at {lock_path}; lock should be skipped "
+        f"for pure-read invocations"
+    )
+
+
+def test_dry_run_does_not_materialize_lockfile(sandbox):
+    """``librarian create --dry-run`` must NOT create the lock sidecar — the
+    --dry-run path returns early without writing.
+
+    v1.7.1 follow-up.
+    """
+    lock_path = sandbox.activities.with_suffix(".yaml.lock")
+    if lock_path.exists():
+        lock_path.unlink()
+    entry = {
+        "id": "2026-09-dry-run",
+        "date": "2026-09-01",
+        "title": "Dry run probe",
+        "description": "Should not write or lock.",
+        "tags": ["probe"],
+    }
+    out, _, rc = sandbox.run("create", "--dry-run", stdin=json.dumps(entry))
+    assert rc == 0
+    assert not lock_path.exists(), (
+        f"--dry-run materialized lockfile at {lock_path}; lock should be "
+        f"skipped for pure-read invocations"
+    )
