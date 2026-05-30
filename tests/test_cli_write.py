@@ -3518,10 +3518,12 @@ def test_write_preserves_file_mode(sandbox):
     assert mode_after == 0o600, f"write reverted mode: {oct(mode_before)} -> {oct(mode_after)}"
 
 
-def test_append_text_round_trips_parseable_yaml(sandbox):
-    """A full ``cmd_create`` (which appends via append_text) must leave
-    the activities file fully parseable after the write completes —
-    atomic-replace semantics.
+def test_create_round_trips_parseable_yaml(sandbox):
+    """A full ``cmd_create`` must leave the activities file fully
+    parseable after the write completes — atomic-replace semantics.
+    (The ``append_text`` helper that previously backed this was retired
+    in v1.7.1; ``cmd_create`` now inlines read-existing + concat +
+    atomic_replace under the lock.)
 
     v1.7.1 follow-up — round-2 PR #20 #1.
     """
@@ -3538,6 +3540,104 @@ def test_append_text_round_trips_parseable_yaml(sandbox):
 
     parsed = _yaml.safe_load(sandbox.activities.read_text())
     assert any(e["id"] == "2026-09-atomic-append" for e in parsed["activities"])
+
+
+def test_writer_help_works_without_label(sandbox):
+    """``librarian <writer-cmd> --help`` must print usage and exit 0
+    even when no session label is set. Round-4 review #5: pre-fix the
+    decorator skipped the lock for --help but ``_resolve_label`` (called
+    inside the function body) still required a label, so a fresh-shell
+    user got ``ERROR: write operations require --label`` instead of
+    usage. The decorator now short-circuits to help-printing before any
+    label resolution.
+
+    v1.7.1 follow-up — round-4 PR #20 #5.
+    """
+    for cmd in ("delete", "add-tags", "remove-tags", "add-docs", "remove-docs"):
+        out, _, rc = sandbox.run(cmd, "--help", extra_env={"LIBRARIAN_SESSION_LABEL": ""})
+        assert rc == 0, f"{cmd} --help should exit 0 without label: {out}"
+        assert "Usage" in out or "usage" in out, f"{cmd} --help should print usage: {out}"
+
+
+def test_file_rehash_skips_empty_string_id(sandbox):
+    """A malformed inventory record with ``id: ""`` must be skipped at
+    phase 2 to avoid bucket-colliding with other empty-id records under
+    ``hash_results[""]`` (last-write-wins → wrong digest written to one
+    of the records → silent inventory corruption).
+
+    v1.7.1 follow-up — round-4 PR #20 #1 HIGH.
+    """
+    data_root = sandbox.activities.parent
+    (data_root / "ok-file.txt").write_text("alpha")
+    sandbox.run("file-add", "ok-file.txt", "--category", "evidence", "--title", "OK")
+    # Hand-edit the inventory to add a record with empty-string id.
+    import yaml as _yaml
+
+    files_yaml = data_root / "files.yaml"
+    data = _yaml.safe_load(files_yaml.read_text())
+    data["files"].append({"id": "", "path": "ok-file.txt", "category": "evidence", "title": "Bad"})
+    files_yaml.write_text(_yaml.dump(data, default_flow_style=False, sort_keys=False))
+
+    out, _, rc = sandbox.run("file-rehash", "--all")
+    assert rc == 0, f"file-rehash failed: {out}"
+    # The empty-id record must NOT appear in any notice that implies a
+    # successful or attempted rehash — it's silently dropped from phase 2.
+    # We assert no traceback / no crash.
+
+
+def test_file_rehash_skips_empty_path(sandbox):
+    """A record with empty / non-string ``path`` must be reported as
+    malformed, not routed into the generic "vanished or unreadable"
+    notice. ``root / ""`` returns the data home (a directory) which
+    ``.exists()`` reports True and ``sha256_of`` then opens as a file →
+    ``IsADirectoryError``; we trap this earlier with a clear notice.
+
+    v1.7.1 follow-up — round-4 PR #20 #2.
+    """
+    data_root = sandbox.activities.parent
+    (data_root / "real-file.txt").write_text("content")
+    sandbox.run("file-add", "real-file.txt", "--category", "evidence", "--title", "Real")
+    import yaml as _yaml
+
+    files_yaml = data_root / "files.yaml"
+    data = _yaml.safe_load(files_yaml.read_text())
+    data["files"].append({"id": "bad-path", "path": "", "category": "evidence", "title": "Bad"})
+    files_yaml.write_text(_yaml.dump(data, default_flow_style=False, sort_keys=False))
+
+    out, _, rc = sandbox.run("file-rehash", "--all")
+    assert rc == 0, f"file-rehash failed: {out}"
+    assert "empty / non-string path" in out
+    assert "bad-path" in out
+
+
+def test_merge_dry_run_surfaces_folded_scalar_rejection(sandbox):
+    """The dry-run preview must error on a folded-scalar (``description:
+    >``) target when ``--append-sources`` is on — pre-fix the gate ran
+    only in the execute phase, so the preview printed normally and only
+    ``--confirm`` failed.
+
+    v1.7.1 follow-up — round-4 PR #20 #3.
+    """
+    target = _merge_target_entry()
+    sandbox.run("create", stdin=json.dumps(target))
+    # Convert target's description to a folded scalar by hand-edit.
+    text = sandbox.activities.read_text()
+    target_idx = text.find("- id: 2026-09-mg-target")
+    desc_idx = text.find("description: |", target_idx)
+    text = text[:desc_idx] + "description: >" + text[desc_idx + len("description: |") :]
+    sandbox.activities.write_text(text)
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--append-sources",
+        # NO --confirm: this is a dry-run preview.
+    )
+    assert rc == 1, f"dry-run should reject folded scalar: {out}"
+    assert "folded" in out.lower()
 
 
 def test_label_rejects_flag_as_value(sandbox):

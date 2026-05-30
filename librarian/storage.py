@@ -178,15 +178,25 @@ def atomic_replace(yaml_path: Path, new_content: str) -> None:
     Caller must hold the resource's :class:`write_lock`.
     """
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
+    # Resolve symlinks before writing so the atomic-replace operates on the
+    # link's TARGET, not the link itself. Without this, ``os.replace`` would
+    # silently destroy the symlink — a user who aliased their data home into
+    # a synced folder (Syncthing, Dropbox, NFS mount) would see the link
+    # replaced by a local file on the first write, and the synced
+    # destination would silently stop receiving updates.
+    if yaml_path.is_symlink():
+        target_path = yaml_path.resolve()
+    else:
+        target_path = yaml_path
+    tmp_path = target_path.with_suffix(target_path.suffix + ".tmp")
     try:
         with open(tmp_path, "w", encoding="utf-8") as fh:
             fh.write(new_content)
-        if yaml_path.exists():
+        if target_path.exists():
             import shutil
 
-            shutil.copymode(yaml_path, tmp_path)
-        os.replace(tmp_path, yaml_path)
+            shutil.copymode(target_path, tmp_path)
+        os.replace(tmp_path, target_path)
     except BaseException:
         # Clean up the orphan sidecar on any failure (write error,
         # copymode, replace, KeyboardInterrupt) so an interrupted write
@@ -208,20 +218,11 @@ def write_lines(yaml_path: Path, lines: list[str]) -> None:
         atomic_replace(yaml_path, "".join(lines))
 
 
-def append_text(yaml_path: Path, text: str) -> None:
-    """Append `text` to the activities file under an exclusive lock.
-
-    Used by ``create`` to add a new entry. Atomic from a concurrent
-    reader's POV: we read the existing content, concat the new text, and
-    write the combined result via temp+``os.replace``. The cost is a full
-    file rewrite per create (proportional to the existing corpus size)
-    in exchange for atomicity — without it, an unlocked reader can land
-    mid-``open("a")``'s flushes and see a truncated final entry whose
-    YAML doesn't parse.
-    """
-    with write_lock(yaml_path):
-        existing = yaml_path.read_text(encoding="utf-8") if yaml_path.exists() else ""
-        atomic_replace(yaml_path, existing + text)
+# ``append_text`` was removed in v1.7.1. ``cmd_create`` now inlines the
+# read-existing + concat + atomic_replace dance directly inside its lock-
+# protected write phase, and no other caller used it. The atomic-rewrite
+# trade (full O(N) rewrite per create) is documented at the create call
+# site rather than buried in a one-line helper.
 
 
 # ---------------------------------------------------------------------------

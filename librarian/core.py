@@ -223,9 +223,9 @@ _HISTORICAL_PHRASES_RE = re.compile(
     # backticked id).
     r"consolidat(?:e|es|ed|ing)\s+from|"
     r"consolidat(?:e|es|ed|ing)\s+(?:into|under)"
-    r"(?=\s*(?:$|`[^`]*`\s*(?:and|or|&|,)))|"
+    r"(?=\s*(?:$|`[^`]*`\s*(?:and|or|&|,|;)))|"
     r"merged\s+from|"
-    r"merged\s+into(?=\s*(?:$|`[^`]*`\s*(?:and|or|&|,)))|"
+    r"merged\s+into(?=\s*(?:$|`[^`]*`\s*(?:and|or|&|,|;)))|"
     r"renamed\s+(?:from|to)|"
     r"superseded\s+by"
     # The bare alternatives "old id", "former(ly) id" and "was named/known as"
@@ -342,11 +342,13 @@ def scan_dangling_refs(
                 pair_matches = list(_BACKTICK_PAIR_RE.finditer(preceding))
                 if pair_matches:
                     last_close_pos = pair_matches[-1].end() - 1
-                    # Strip includes \r and \n so a multi-line continuation
-                    # list ("Originally tracked under `a`,\n  and `b`")
-                    # still recognizes the "and" continuation rather than
-                    # treating the leading newline as a clause break.
-                    between = preceding[last_close_pos + 1 :].strip(" \t,\r\n")
+                    # Strip includes ``\r``, ``\n``, ``,`` and ``;`` so a
+                    # multi-line continuation list ("Originally tracked
+                    # under `a`,\n  and `b`") or a semicolon-separated
+                    # audit list ("Merged into `a`; `b`") still recognizes
+                    # the continuation rather than treating the leading
+                    # whitespace / punctuation as a clause break.
+                    between = preceding[last_close_pos + 1 :].strip(" \t,;\r\n")
                     if between and between.lower() not in ("and", "or", "&"):
                         preceding = preceding[last_close_pos + 1 :]
                 if _HISTORICAL_PHRASES_RE.search(preceding):
