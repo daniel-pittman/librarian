@@ -3647,6 +3647,90 @@ def test_merge_dry_run_surfaces_folded_scalar_rejection(sandbox):
     assert "folded" in out.lower()
 
 
+def test_label_equals_form_rejects_flag_as_value(sandbox):
+    """``--label=--dry-run`` (equals-form, value-looks-like-flag) must
+    be rejected — pre-fix the v1.7.1 round-5 equals-form support didn't
+    apply the flag-shape guard the space-form had, so the typo silently
+    recorded ``label="--dry-run"`` in the ledger.
+
+    v1.7.2 follow-up — v1.7.1 round-6 #2 HIGH (deferred at v1.7.1 cut).
+    """
+    entry = {
+        "id": "2026-09-bad-eq-label",
+        "date": "2026-09-01",
+        "title": "Equals-form flag probe",
+        "description": "Should be rejected.",
+        "tags": ["probe"],
+    }
+    out, _, rc = sandbox.run(
+        "create",
+        "--label=--dry-run",
+        "--json",
+        json.dumps(entry),
+        extra_env={"LIBRARIAN_SESSION_LABEL": ""},
+    )
+    assert rc == 1, f"expected rejection: {out}"
+    assert "looks like another flag" in out
+    assert "2026-09-bad-eq-label" not in sandbox.activities.read_text()
+
+
+def test_merge_tolerates_space_before_description_colon(sandbox):
+    """A hand-edited target with ``description :`` (space before the
+    colon — tolerated by ``_find_entry_field_line``) must produce a
+    friendly error in the merge shape gate, not an ``IndexError``
+    traceback.
+
+    v1.7.2 follow-up — v1.7.1 round-6 #3 HIGH (deferred at v1.7.1 cut).
+    """
+    target = _merge_target_entry()
+    sandbox.run("create", stdin=json.dumps(target))
+    text = sandbox.activities.read_text()
+    target_idx = text.find("- id: 2026-09-mg-target")
+    desc_idx = text.find("description:", target_idx)
+    text = text[:desc_idx] + "description :" + text[desc_idx + len("description:") :]
+    sandbox.activities.write_text(text)
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+
+    for extra in ([], ["--confirm"]):
+        out, err, rc = sandbox.run(
+            "merge",
+            "2026-09-mg-source",
+            "--into",
+            "2026-09-mg-target",
+            "--append-sources",
+            *extra,
+        )
+        combined = (out + err).lower()
+        assert "traceback" not in combined, f"unexpected traceback (extra={extra}): {err}"
+        assert "indexerror" not in combined
+
+
+def test_create_bootstraps_empty_existing_activities_yaml(sandbox):
+    """A 0-byte / whitespace-only / no-``activities:``-key pre-existing
+    ``activities.yaml`` must be bootstrapped with the ``activities:``
+    header on first create — not appended-to in a way that produces an
+    unparseable root-list file.
+
+    v1.7.2 follow-up — v1.7.1 round-6 #4 HIGH (deferred at v1.7.1 cut).
+    """
+    sandbox.activities.write_text("")
+    entry = {
+        "id": "2026-09-bootstrap",
+        "date": "2026-09-01",
+        "title": "Bootstrap probe",
+        "description": "Should bootstrap clean.",
+        "tags": ["probe"],
+    }
+    out, err, rc = sandbox.run("create", stdin=json.dumps(entry))
+    assert rc == 0, f"create failed: {err}"
+    import yaml as _yaml
+
+    loaded = _yaml.safe_load(sandbox.activities.read_text())
+    assert isinstance(loaded, dict), f"expected mapping, got {type(loaded).__name__}"
+    assert "activities" in loaded
+    assert any(e["id"] == "2026-09-bootstrap" for e in loaded["activities"])
+
+
 def test_label_rejects_flag_as_value(sandbox):
     """``--label --dry-run`` is a typo (forgot the label string). Without
     the round-3 fix, ``_resolve_label`` would pop ``--dry-run`` as the
