@@ -1368,9 +1368,14 @@ def _render_scalar(field, value) -> str:
         # silently flipped to false (validate_block already accepts these).
         if isinstance(value, bool):
             return "true" if value else "false"
-        if isinstance(value, str) and value.strip().lower() in ("true", "yes", "1"):
-            return "true"
-        return "false"
+        if isinstance(value, str):
+            low = value.strip().lower()
+            if low in ("true", "yes", "1"):
+                return "true"
+            if low in ("false", "no", "0"):
+                return "false"
+            raise ValueError(f"'{value}' is not a boolean for field '{field.name}'")
+        raise ValueError(f"'{value!r}' is not a boolean for field '{field.name}'")
     return yaml_quote(str(value))
 
 
@@ -1414,6 +1419,13 @@ def cmd_delete(ctx: Context, args: list[str]) -> int:
     if ("-h" in args or "--help" in args) and len(args) > 1:
         print("ERROR: -h/--help must be used alone (no other arguments)")
         return 2
+    # Bare `delete` (no entry id) is a user error worth distinguishing from
+    # argparse's generic "missing argument" exit code 2.
+    if not args:
+        print(
+            "ERROR: delete requires an entry id (usage: librarian delete <entry-id> [--repoint-to <id>] [--confirm])"
+        )
+        return 1
     parser = argparse.ArgumentParser(prog="librarian delete")
     parser.add_argument("entry_id")
     parser.add_argument("--confirm", action="store_true")
@@ -2069,9 +2081,10 @@ def cmd_remove_tags(ctx: Context, args: list[str]) -> int:
         lines[tags_idx] = f"{indent}tags: [{', '.join(repr(t) for t in remaining)}]\n"
     else:
         items, _, _ = _scan_list_items(lines, tags_idx, end)
-        # Single pass — keeping `to_delete` (line indices) and `removed`
-        # (tag values) in sync via two separate list comprehensions over
-        # `items` would invite drift if the match predicate ever grew.
+        # Build the deletion plan in one pass: keeping `to_delete` (line
+        # indices) and `removed` (tag values) in sync via two separate list
+        # comprehensions over `items` would invite drift if the match
+        # predicate ever grew.
         matches = [(idx, tag) for idx, tag in items if tag in drop]
         to_delete = [idx for idx, _ in matches]
         removed = [tag for _, tag in matches]

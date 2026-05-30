@@ -1286,7 +1286,8 @@ def test_add_tags_skips_comment_line_before_items(sandbox):
     assert needle in text, "fixture layout changed; update this test"
     sandbox.activities.write_text(text.replace(needle, with_comment))
 
-    sandbox.run("add-tags", "2024-03-intro-security-course", "appended-tag")
+    out, err, rc = sandbox.run("add-tags", "2024-03-intro-security-course", "appended-tag")
+    assert rc == 0, f"add-tags failed: stdout={out!r} stderr={err!r}"
     tags = sandbox.entry("2024-03-intro-security-course")["tags"]
     assert tags[-1] == "appended-tag"
     assert tags[:3] == ["teaching", "cpe-primary", "course"]

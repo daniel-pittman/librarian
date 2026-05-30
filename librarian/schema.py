@@ -384,7 +384,7 @@ def coerce_value(field: FieldDef, raw: str):
     if field.type == "int":
         return int(raw.strip())
     if field.type == "bool":
-        low = raw.lower()
+        low = raw.strip().lower()
         if low in _TRUE_STRINGS:
             return True
         if low in _FALSE_STRINGS:
