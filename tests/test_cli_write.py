@@ -2792,6 +2792,47 @@ def test_merge_append_sources_rewrites_self_backticks_in_bodies(sandbox):
     assert "DANGLING REF: 2026-09-mg-target" not in out
 
 
+def test_merge_append_sources_preserves_plain_text_source_id_mentions(sandbox):
+    """Plain-text (un-backticked) mentions of a source id in a source body
+    must NOT be rewritten when --append-sources splices the body into the
+    target's description.
+
+    Round-5 review finding #1: a word-boundary regex would silently
+    rewrite narrative like "Originally tracked under <sid> before
+    consolidation" into a fabricated self-reference. The append-sources
+    body rewrite must be backtick-anchored (matching step 1b's pattern).
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    src = _merge_source_entry(
+        description=(
+            "Originally tracked under 2026-09-mg-source before consolidation. "
+            "See `2026-09-mg-source` for the prior write-up."
+        ),
+    )
+    out, err, rc = sandbox.run("create", stdin=json.dumps(src))
+    assert rc == 0, f"src create failed: {err}"
+    out, err, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--append-sources",
+        "--confirm",
+    )
+    assert rc == 0, f"merge failed: {err}"
+    desc = sandbox.entry("2026-09-mg-target")["description"]
+    # Plain-text mention survives intact — the author's historical claim
+    # ("Originally tracked under <sid>") must not be silently rewritten
+    # into a fabricated self-reference ("Originally tracked under <target>").
+    assert "Originally tracked under 2026-09-mg-source before consolidation" in desc, (
+        "plain-text mention of source id was silently rewritten — "
+        "the body rewrite must be backtick-anchored, not word-boundary"
+    )
+    # Backticked mention IS still rewritten to target_id (round-4 fix).
+    assert "`2026-09-mg-source`" not in desc
+    assert "`2026-09-mg-target`" in desc
+
+
 def test_merge_rewrites_backticked_source_id_inside_target_range(sandbox):
     """Backticked source-id mentions in the TARGET's prose are live
     cross-references and must be rewritten, even though plain-text mentions

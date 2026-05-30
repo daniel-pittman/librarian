@@ -2816,14 +2816,21 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
                     new_body_lines.append(f"{' ' * body_indent}## From {sid}\n")
                     new_body_lines.append(f"{' ' * body_indent}\n")
                     continue
-                # Rewrite ALL source-id backticks in the body to target_id,
-                # including the source's own self-mentions. Once this body
-                # lives inside the target's description, every backticked
-                # source id is a reference to an entry that step 6 is about
-                # to delete — leaving any of them in place produces a fresh
-                # dangling ref the moment the merge commits.
-                for pattern in id_patterns.values():
-                    body, n = pattern.subn(target_id, body)
+                # Rewrite ALL backticked source-id mentions in the body to
+                # target_id, including the source's own self-backticks. Once
+                # this body lives inside the target's description, every
+                # backticked source id is a reference to an entry that step 6
+                # is about to delete — leaving any of them in place produces
+                # a fresh dangling ref the moment the merge commits.
+                #
+                # Use a backtick-anchored pattern (NOT id_patterns, which is
+                # a word-boundary regex appropriate for block data values).
+                # Word-boundary on prose would silently rewrite plain-text
+                # mentions like "Originally tracked under <sid> before
+                # consolidation" — fabricating a historical claim the user
+                # didn't write.
+                for other_sid in source_ids:
+                    body, n = re.subn(rf"`{re.escape(other_sid)}`", f"`{target_id}`", body)
                     actual_repoint_total += n
                 new_body_lines.append(f"{' ' * body_indent}## From {sid}\n")
                 for line in body.splitlines():

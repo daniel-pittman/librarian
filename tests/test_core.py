@@ -239,6 +239,68 @@ def test_scan_dangling_refs_historical_phrase_window_is_local():
     assert findings, "a far-away historical phrase must not hide a dangling ref"
 
 
+def test_scan_dangling_refs_does_not_suppress_on_bare_originally_stored_or_known():
+    """The ``originally\\s+(...)`` branch used to allow bare completers
+    (``originally stored``, ``originally known``, ``originally filed``)
+    while the matching ``previously`` / ``formerly`` branches required
+    ``as`` / ``under``. The asymmetry re-opened exactly the blanket-
+    suppression hole round-2 closed for the other branches.
+
+    Round-5 review finding #2: tighten the ``originally`` branch to the
+    same discipline — each form must be followed by its completer word
+    (``as``, ``under``).
+    """
+    activities = [
+        _entry(
+            "2026-09-stored",
+            description=(
+                "The dataset was originally stored as CSV. "
+                "See `2024-broken-ref` for migration notes."
+            ),
+        ),
+        _entry(
+            "2026-09-known",
+            description=(
+                "The helper was originally known internally as a fragile area. "
+                "Compare `2024-also-broken`."
+            ),
+        ),
+        _entry(
+            "2026-09-filed",
+            description=(
+                "The volume was originally filed by mistake; "
+                "replaced by the entry at `2024-third-broken`."
+            ),
+        ),
+    ]
+    ids = {"2026-09-stored", "2026-09-known", "2026-09-filed"}
+    findings = scan_dangling_refs(activities, ids=ids, text_fields=_DESC)
+    refs = {ref for _, ref, _ in findings}
+    assert "2024-broken-ref" in refs, (
+        f"bare 'originally stored' (no 'as') must not hide a dangling ref: {findings}"
+    )
+    assert "2024-also-broken" in refs, (
+        f"bare 'originally known' (no 'as') must not hide a dangling ref: {findings}"
+    )
+    assert "2024-third-broken" in refs, (
+        f"bare 'originally filed' (no 'under') must not hide a dangling ref: {findings}"
+    )
+
+
+def test_scan_dangling_refs_still_skips_originally_stored_as():
+    """The tightened ``originally`` branch must still recognize the explicit
+    completer forms (``originally stored as``, ``originally known as``,
+    ``originally filed under``) as historical context."""
+    activities = [
+        _entry(
+            "2026-09-archived",
+            description=("Originally stored as `2024-archive-id` before the migration."),
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-archived"}, text_fields=_DESC)
+    assert findings == [], f"explicit completer form was wrongly flagged: {findings}"
+
+
 def test_scan_dangling_refs_does_not_suppress_on_bare_was_named_or_old_id():
     """The bare alternatives ``was named``, ``old id`` and ``former(ly) id``
     used to live in the historical-phrase regex. They were too generic —
