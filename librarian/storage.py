@@ -234,7 +234,17 @@ def atomic_replace(yaml_path: Path, new_content: str) -> None:
             pass
         else:
             try:
-                os.fsync(dirfd)
+                # Guard the fsync itself: ``os.replace`` already succeeded
+                # so the data is on disk. A directory-fsync failure here
+                # (transient EIO / EINVAL on FUSE / NFS / SMB / WSL mounts)
+                # is a durability degradation, not a correctness failure.
+                # Pre-fix the OSError escaped ``atomic_replace`` and
+                # ``append_ledger`` never ran — disk had the write, ledger
+                # didn't. v1.7.2 round-1 #3.
+                try:
+                    os.fsync(dirfd)
+                except OSError:
+                    pass
             finally:
                 os.close(dirfd)
     except BaseException:

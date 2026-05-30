@@ -1442,13 +1442,43 @@ def cmd_create(ctx: Context, args: list[str]) -> int:
         else:
             existing_content = ""
         # Bootstrap an ``activities:`` header when the on-disk content
-        # has no real entries: a freshly-created empty file (touch),
-        # whitespace-only, or content that doesn't start with the
-        # required mapping key. v1.7.2: closes the round-6 #4 deferred
-        # HIGH where a 0-byte pre-existing file produced an unparseable
-        # root-list ("- id: ...") and every subsequent read crashed.
-        if not existing_content.strip() or "activities:" not in existing_content:
-            existing_content = "activities:\n"
+        # has no real top-level ``activities:`` mapping key. Empty /
+        # whitespace-only file → safe to bootstrap (no user bytes to
+        # preserve). File with real content but no key (e.g. only a
+        # ``meta:`` block) → REFUSE rather than guess: silently
+        # appending an indented list under no parent key would produce
+        # malformed YAML, and silently rewriting to a bare header would
+        # destroy the user's content. The line-anchored check avoids
+        # false-positives on ``# activities:`` comments and on
+        # description text containing the literal string. v1.7.2 round-1
+        # review: closes the round-6 #4 deferred HIGH and the data-loss
+        # / false-positive shapes my first attempt introduced (review
+        # #1 HIGH + #2 MED).
+        # Inspect non-blank, non-comment lines. ``has_real_content``
+        # decides between "safe to bootstrap" (empty / only comments) and
+        # "refuse rather than silently corrupt" (real top-level content).
+        non_comment_lines = [
+            ln
+            for ln in existing_content.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")
+        ]
+        has_real_content = bool(non_comment_lines)
+        has_root_key = any(ln.lstrip().startswith("activities:") for ln in non_comment_lines)
+        if not has_real_content:
+            # Empty / whitespace / comments-only — safe to bootstrap.
+            # Preserve any comment lines the user wrote.
+            existing_content = (
+                existing_content + "activities:\n" if existing_content.strip() else "activities:\n"
+            )
+        elif not has_root_key:
+            print(
+                f"ERROR: existing '{ctx.paths.activities}' has content but no "
+                f"top-level 'activities:' mapping key; refusing to write to "
+                f"avoid silently corrupting the file. Add 'activities:' as "
+                f"the top-level key (your other content is preserved) or "
+                f"move the file aside and retry."
+            )
+            return 1
         atomic_replace(ctx.paths.activities, existing_content + "\n" + yaml_text)
         append_ledger(
             ctx.paths.ledger, "create", data["id"], label, details=f"tags={len(data['tags'])}"
@@ -3640,6 +3670,12 @@ def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
                 detail += f" missing={len(missing)}"
             if malformed:
                 detail += f" malformed={len(malformed)}"
+            # Tag rows that detected something but didn't change disk so
+            # ledger consumers can filter detect-only noise (e.g. an
+            # hourly cron rehashing a persistently-missing inventory).
+            # v1.7.2 round-1 #4.
+            if rehashed == 0:
+                detail += " detect-only=1"
             append_ledger(ctx.paths.ledger, "file-rehash", scope, label, detail)
 
     print(f"Rehashed {rehashed} file(s).")

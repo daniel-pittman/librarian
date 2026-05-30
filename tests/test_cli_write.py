@@ -3731,6 +3731,56 @@ def test_create_bootstraps_empty_existing_activities_yaml(sandbox):
     assert any(e["id"] == "2026-09-bootstrap" for e in loaded["activities"])
 
 
+def test_create_refuses_pre_existing_non_activities_content(sandbox):
+    """A hand-edited ``activities.yaml`` that contains content but no
+    top-level ``activities:`` mapping key must cause ``create`` to
+    REFUSE the write — not silently overwrite (data loss) and not
+    silently produce a malformed root-list file. The user keeps their
+    bytes; they're shown a clear error.
+
+    v1.7.2 round-1 review #1 HIGH (data-loss regression in my first
+    attempt at the round-6 #4 fix).
+    """
+    original = "meta:\n  schema_version: 2\n"
+    sandbox.activities.write_text(original)
+    entry = {
+        "id": "2026-09-preserve",
+        "date": "2026-09-01",
+        "title": "Preserve probe",
+        "description": "Pre-existing meta must survive.",
+        "tags": ["probe"],
+    }
+    out, _, rc = sandbox.run("create", stdin=json.dumps(entry))
+    assert rc == 1, f"create should refuse: {out}"
+    assert "no top-level 'activities:' mapping key" in out
+    # The file must be untouched — bit-for-bit.
+    assert sandbox.activities.read_text() == original
+
+
+def test_create_bootstrap_ignores_commented_activities_substring(sandbox):
+    """A ``# activities: archived ...`` comment line in a hand-edited
+    file must NOT trick the bootstrap into thinking the root mapping
+    key is present. Line-anchored check prevents this v1.7.2 round-1
+    #2 false-positive.
+    """
+    sandbox.activities.write_text("# activities: archived 2025\n")
+    entry = {
+        "id": "2026-09-comment-bootstrap",
+        "date": "2026-09-01",
+        "title": "Comment probe",
+        "description": "Comment must not fool bootstrap.",
+        "tags": ["probe"],
+    }
+    out, err, rc = sandbox.run("create", stdin=json.dumps(entry))
+    assert rc == 0, f"create failed: {err}"
+    import yaml as _yaml
+
+    loaded = _yaml.safe_load(sandbox.activities.read_text())
+    assert isinstance(loaded, dict), f"expected mapping, got {type(loaded).__name__}"
+    assert "activities" in loaded
+    assert any(e["id"] == "2026-09-comment-bootstrap" for e in loaded["activities"])
+
+
 def test_label_rejects_flag_as_value(sandbox):
     """``--label --dry-run`` is a typo (forgot the label string). Without
     the round-3 fix, ``_resolve_label`` would pop ``--dry-run`` as the
