@@ -593,6 +593,7 @@ def librarian_merge(
     confirm: bool = False,
     on_block_conflict: str = "abort",
     with_provenance: bool = True,
+    append_sources: bool = False,
 ) -> str:
     """Merge one or more source entries into a target, atomically.
 
@@ -603,16 +604,19 @@ def librarian_merge(
     reference to each source id is repointed to the target before the source
     entries are deleted, so the merge does not leave dangling cross-references.
 
-    The target's description is kept as-is. Source descriptions are returned
-    in the dry-run output for the caller to fold into the target manually via
-    ``librarian_update_description`` (description merging is editorial, not
-    mechanical). Set ``confirm=True`` to actually execute; otherwise the call
-    returns the dry-run plan.
+    By default the target's description stays as-is and source descriptions
+    are returned in the dry-run output for manual folding via
+    ``librarian_update_description`` (description merging is editorial).
+    Set ``append_sources=True`` to append each source's description verbatim
+    under a ``## From <source-id>`` plain-text header in the target's
+    literal-block description (a mechanical fold for callers who want it).
     """
     label = _validate_label(session_label)
     args = ["merge", *source_ids, "--into", target_id]
     if on_block_conflict and on_block_conflict != "abort":
         args += ["--on-block-conflict", on_block_conflict]
+    if append_sources:
+        args.append("--append-sources")
     if not with_provenance:
         args.append("--no-provenance")
     if confirm:

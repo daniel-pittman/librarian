@@ -194,6 +194,30 @@ def tag_kernel(tag: str) -> str:
 _BACKTICKED_RE = re.compile(r"`([a-z0-9][a-z0-9-]+[a-z0-9])`")
 _HAS_DIGIT_RE = re.compile(r"\d")
 
+# Phrases that mark a following backticked id as deliberately historical, not a
+# live cross-reference. The scanner skips such mentions even when the id has
+# been renamed away or consolidated under a merge, so prose like "Originally
+# tracked under `2024-foo`" or "Consolidates `2023-bar`" doesn't surface as a
+# DANGLING REF after the fact. Matched within a ~200-char window preceding the
+# backtick to keep historical context tied to its own sentence.
+_HISTORICAL_PHRASES_RE = re.compile(
+    r"\b(?:"
+    r"formerly|"
+    r"previously|"
+    r"originally\s+(?:tracked|known|named|filed|recorded)|"
+    r"originally|"
+    r"consolidat\w*\s+(?:from|under|into)|"
+    r"merged\s+(?:from|into)|"
+    r"renamed\s+(?:from|to)|"
+    r"superseded\s+by|"
+    r"old\s+id|"
+    r"former(?:ly)?\s+id|"
+    r"was\s+(?:named|known\s+as)"
+    r")\b",
+    re.IGNORECASE,
+)
+_HISTORICAL_WINDOW = 200  # chars before the backtick we'll scan for a phrase
+
 
 def scan_dangling_refs(
     activities: list[dict],
@@ -239,8 +263,18 @@ def scan_dangling_refs(
                 # Skip names known to NOT be entry ids (tags, file ids).
                 if ref in exclude:
                     continue
-                if ref not in ids:
-                    findings.append((eid, ref, label))
+                if ref in ids:
+                    continue
+                # Treat as historical (not dangling) when a phrase like
+                # "Originally tracked under", "Previously known as",
+                # "Consolidated from" appears in the prose preceding the
+                # backtick. Catches the spec's "soften the scanner for
+                # historical mentions" ask without hiding genuine dangling
+                # refs (no phrase → still flagged).
+                preceding = text[max(0, match.start() - _HISTORICAL_WINDOW) : match.start()]
+                if _HISTORICAL_PHRASES_RE.search(preceding):
+                    continue
+                findings.append((eid, ref, label))
     return findings
 
 

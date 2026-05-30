@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import functools
 import io
 import json
 import os
@@ -64,6 +65,7 @@ from .storage import (
     load_activities,
     read_lines,
     write_lines,
+    write_lock,
     yaml_quote,
 )
 
@@ -105,6 +107,36 @@ def build_context(env: dict[str, str] | None = None) -> Context:
 # =============================================================================
 # Shared helpers
 # =============================================================================
+
+
+def _activities_locked(func):
+    """Take ``write_lock(ctx.paths.activities)`` around the whole command.
+
+    Wraps a writer command so its read-plan-write transaction is exclusive
+    across processes: ``read_lines`` / ``load_activities`` and the eventual
+    ``write_lines`` / ``append_text`` happen under the same fcntl flock, so
+    a concurrent writer cannot clobber a multi-step operation mid-flight.
+    The lock is reentrant within a single thread, so the inner write helpers
+    (which also use ``write_lock``) compose cleanly.
+    """
+
+    @functools.wraps(func)
+    def wrapper(ctx: Context, args: list[str]) -> int:
+        with write_lock(ctx.paths.activities):
+            return func(ctx, args)
+
+    return wrapper
+
+
+def _files_locked(func):
+    """Like :func:`_activities_locked` but for file-inventory writers."""
+
+    @functools.wraps(func)
+    def wrapper(ctx: Context, args: list[str]) -> int:
+        with write_lock(ctx.paths.files):
+            return func(ctx, args)
+
+    return wrapper
 
 
 def _resolve_label(args: list[str], *, required: bool = True) -> str | None:
@@ -1148,6 +1180,7 @@ def _scan_list_items(
     return items, first, last
 
 
+@_activities_locked
 def cmd_create(ctx: Context, args: list[str]) -> int:
     """Create a new entry from JSON on stdin or ``--json``. ``create [--json ...]``
 
@@ -1360,6 +1393,7 @@ def _render_generic_scalar(value) -> str:
     return yaml_quote(str(value))
 
 
+@_activities_locked
 def cmd_delete(ctx: Context, args: list[str]) -> int:
     """Delete an entry by id.
 
@@ -1452,6 +1486,7 @@ def cmd_delete(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+@_activities_locked
 def cmd_update_field(ctx: Context, args: list[str]) -> int:
     """Update a top-level field. ``update-field <id> <field> <value>``
 
@@ -1523,6 +1558,7 @@ def cmd_update_field(ctx: Context, args: list[str]) -> int:
     return 1
 
 
+@_activities_locked
 def cmd_update_description(ctx: Context, args: list[str]) -> int:
     """Replace an entry's description (read from stdin). ``update-description <id>``"""
     label = _resolve_label(args, required=True)
@@ -1607,6 +1643,7 @@ def _scalar_end(lines: list[str], idx: int, key: str, limit: int) -> int:
     return idx + 1
 
 
+@_activities_locked
 def cmd_update_notes(ctx: Context, args: list[str]) -> int:
     """Update a block's notes/text field. ``update-notes <id> [--block B] [--field F]``
 
@@ -1674,6 +1711,7 @@ def cmd_update_notes(ctx: Context, args: list[str]) -> int:
     return 1
 
 
+@_activities_locked
 def cmd_update_nested_field(ctx: Context, args: list[str]) -> int:
     """Update a single schema-block field. ``update-nested-field <id> BLOCK.FIELD VALUE``
 
@@ -1779,6 +1817,7 @@ def cmd_update_nested_field(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+@_activities_locked
 def cmd_set_block(ctx: Context, args: list[str]) -> int:
     """Add a schema block to an existing entry.
 
@@ -1939,6 +1978,7 @@ def _tags_line(lines: list[str], start: int, end: int) -> int | None:
     return _find_field_line(lines, start, end, "tags")
 
 
+@_activities_locked
 def cmd_add_tags(ctx: Context, args: list[str]) -> int:
     """Add tags to an entry. ``add-tags <id> <tag> [tag ...]`` (idempotent)."""
     label = _resolve_label(args, required=True)
@@ -1996,6 +2036,7 @@ def cmd_add_tags(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+@_activities_locked
 def cmd_remove_tags(ctx: Context, args: list[str]) -> int:
     """Remove tags from an entry. ``remove-tags <id> <tag> [tag ...]``"""
     label = _resolve_label(args, required=True)
@@ -2045,6 +2086,7 @@ def cmd_remove_tags(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+@_activities_locked
 def cmd_add_docs(ctx: Context, args: list[str]) -> int:
     """Add doc references (URLs or ``file:<id>``) to an entry. ``add-docs <id> <doc> ...``"""
     label = _resolve_label(args, required=True)
@@ -2095,6 +2137,7 @@ def cmd_add_docs(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+@_activities_locked
 def cmd_remove_docs(ctx: Context, args: list[str]) -> int:
     """Remove a doc reference from an entry. ``remove-docs <id> <doc>``"""
     label = _resolve_label(args, required=True)
@@ -2122,6 +2165,7 @@ def cmd_remove_docs(ctx: Context, args: list[str]) -> int:
     return 1
 
 
+@_activities_locked
 def cmd_rename_id(ctx: Context, args: list[str]) -> int:
     """Rename an entry id and repoint cross-references. ``rename-id <old> <new>``
 
@@ -2168,6 +2212,7 @@ def cmd_rename_id(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+@_activities_locked
 def cmd_merge(ctx: Context, args: list[str]) -> int:
     """Merge source entries into a target, atomically.
 
@@ -2216,6 +2261,15 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
         action="store_true",
         help="omit the plain-text 'Consolidates former entries: ...' note",
     )
+    parser.add_argument(
+        "--append-sources",
+        action="store_true",
+        help=(
+            "append each source's description under a `## From <id>` header "
+            "in the target's literal-block description (opt-in; off by default "
+            "since description merging is editorial)"
+        ),
+    )
     try:
         parsed = parser.parse_args(args)
     except SystemExit as exc:
@@ -2229,6 +2283,7 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
     target_id = parsed.target_id
     on_conflict = parsed.on_conflict
     with_provenance = not parsed.no_provenance
+    append_sources = parsed.append_sources
 
     # De-dup sources; skip self-merges silently.
     source_ids: list[str] = []
@@ -2407,14 +2462,26 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
         source_ranges[sid] = (s_start, s_end)
     all_source_ranges = list(source_ranges.values())
 
-    # Pre-count inbound refs per source, excluding ALL source ranges so refs
-    # that will be deleted in step 6 don't get counted as work done.
+    # Target's own range is also excluded from step 1's repoint. Prose mentions
+    # of source ids inside the target's description / notes (e.g. "originally
+    # tracked under <source-a>") would otherwise be silently rewritten to
+    # self-references that the dangling-ref scanner skips (scan_dangling_refs
+    # treats self-refs as not-dangling), making the rewrite invisible after
+    # the fact. Carried block content is still rewritten in step 2b.
+    t_pre_start, t_pre_end = find_entry_line_range(lines, target_id)
+    if t_pre_start is not None:
+        repoint_skip_ranges = all_source_ranges + [(t_pre_start, t_pre_end)]
+    else:
+        repoint_skip_ranges = all_source_ranges
+
+    # Pre-count inbound refs per source, excluding source ranges + target's
+    # range so the preview matches what step 1's rewrite will actually do.
     repoint_counts: dict[str, int] = {}
     for sid in source_ids:
         pattern = re.compile(rf"(?<![a-z0-9-]){re.escape(sid)}(?![a-z0-9-])")
         n = 0
         for i, line in enumerate(lines):
-            if any(s <= i < e for s, e in all_source_ranges):
+            if any(s <= i < e for s, e in repoint_skip_ranges):
                 continue
             n += len(pattern.findall(line))
         repoint_counts[sid] = n
@@ -2473,7 +2540,7 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
     actual_repoint_total = 0
     for sid in source_ids:
         actual_repoint_total += _repoint_references(
-            lines, sid, target_id, skip_ranges=all_source_ranges
+            lines, sid, target_id, skip_ranges=repoint_skip_ranges
         )
 
     # 2. Carry blocks onto the target. For keep-source we may have to delete
@@ -2483,7 +2550,47 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
     #    (schema-unknown) blocks, mirroring _render_entry's generic-block
     #    path; that's how a source block the schema doesn't declare is still
     #    carried over rather than silently dropped.
+    #
+    #    Before each splice, rewrite source-id mentions inside the carried
+    #    block's string values to target_id — those mentions came from inside
+    #    a source range step 1 skipped, so the line-level repoint won't catch
+    #    them. Doing this on the parsed data (not the spliced lines) keeps
+    #    the target's own description prose untouched.
+    id_patterns = {
+        sid: re.compile(rf"(?<![a-z0-9-]){re.escape(sid)}(?![a-z0-9-])") for sid in source_ids
+    }
+
+    def _rewrite_ids(value):
+        """Walk a block's value tree, rewriting source-id mentions in strings.
+        Returns (new_value, count_of_substitutions)."""
+        if isinstance(value, str):
+            count = 0
+            for pattern in id_patterns.values():
+                value, n = pattern.subn(target_id, value)
+                count += n
+            return value, count
+        if isinstance(value, dict):
+            count = 0
+            new = {}
+            for k, v in value.items():
+                new[k], n = _rewrite_ids(v)
+                count += n
+            return new, count
+        if isinstance(value, list):
+            count = 0
+            new = []
+            for v in value:
+                rv, n = _rewrite_ids(v)
+                new.append(rv)
+                count += n
+            return new, count
+        return value, 0
+
     for bn, (_sid, block_data) in blocks_to_carry.items():
+        rewritten_block, n = _rewrite_ids(block_data)
+        actual_repoint_total += n
+        blocks_to_carry[bn] = (_sid, rewritten_block)
+        block_data = rewritten_block
         t_start, t_end = find_entry_line_range(lines, target_id)
         existing_idx = _find_entry_field_line(lines, t_start, t_end, bn)
         if existing_idx is not None:
@@ -2516,22 +2623,9 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
             print(f"ERROR: {exc} on '{target_id}'")
             return 1
 
-    # 2b. The just-spliced block content was lifted verbatim from a source
-    #     range that step 1 skipped, so any mention of ANOTHER source's id
-    #     inside that content didn't get repointed. Rewrite those mentions
-    #     now, scoped to the target's range, before step 6 deletes the
-    #     referenced sources and leaves a dangling cross-reference. The
-    #     count is added to actual_repoint_total for the ledger summary.
-    if blocks_to_carry:
-        t_start, t_end = find_entry_line_range(lines, target_id)
-        target_range = (t_start, t_end)
-        for sid in source_ids:
-            pattern = re.compile(rf"(?<![a-z0-9-]){re.escape(sid)}(?![a-z0-9-])")
-            for i in range(target_range[0], target_range[1]):
-                new_line, n = pattern.subn(target_id, lines[i])
-                if n:
-                    lines[i] = new_line
-                    actual_repoint_total += n
+    # (No separate "step 2b" loop is needed any more: the pre-splice rewrite
+    # at step 2's top scoped the carried-block-content fix to the block's own
+    # data, leaving the target's existing description prose untouched.)
 
     # 3. Union tags into target's tags list. Handle inline + multi-line, the
     #    same shapes cmd_add_tags supports, so a hand-edited target survives.
@@ -2605,13 +2699,14 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
             for offset, doc in enumerate(new_docs):
                 lines.insert(last_item_idx + 1 + offset, f"{item_indent}- {yaml_quote(doc)}\n")
 
-    # 5. Provenance note. Plain text only — backticked ids would trip the
-    #    validate dangling-ref scanner once the source entries are deleted.
-    #    The note is appended to the target's description, which MUST be a
-    #    literal-block scalar (`description: |`); refuse on an inline scalar
-    #    shape ("description: hello") because YAML would silently fold the
-    #    note into the value rather than treating it as a body line.
-    if with_provenance:
+    # 5. Description-body additions: the provenance one-liner (default on)
+    #    and the optional `--append-sources` full-source fold. Plain text only
+    #    — backticked source ids would trip the validate dangling-ref scanner
+    #    once the source entries are deleted. The target's description MUST
+    #    be a literal-block scalar (`description: |`); refuse on an inline or
+    #    empty scalar because YAML would silently fold an appended line into
+    #    the value rather than treating it as a body line.
+    if with_provenance or append_sources:
         t_start, t_end = find_entry_line_range(lines, target_id)
         desc_idx = _find_entry_field_line(lines, t_start, t_end, "description")
         if desc_idx is None:
@@ -2652,8 +2747,23 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
                 body_indent = line_idx_indent
         if body_indent is None:
             body_indent = desc_indent + 2
-        note = f"{' ' * body_indent}Consolidates former entries: {', '.join(source_ids)}.\n"
-        lines.insert(body_end, note)
+
+        new_body_lines: list[str] = []
+        if append_sources:
+            # `## From <source-id>` header — plain text so backticks don't
+            # trip the dangling-ref scanner after the source is deleted.
+            for s in sources:
+                sid = s.get("id")
+                body = (s.get("description") or "").strip()
+                new_body_lines.append(f"{' ' * body_indent}## From {sid}\n")
+                for line in body.split("\n"):
+                    new_body_lines.append(f"{' ' * body_indent}{line}\n")
+                new_body_lines.append(f"{' ' * body_indent}\n")
+        if with_provenance:
+            new_body_lines.append(
+                f"{' ' * body_indent}Consolidates former entries: {', '.join(source_ids)}.\n"
+            )
+        lines[body_end:body_end] = new_body_lines
 
     # 6. Delete source entries in descending order so earlier source ranges
     #    stay valid as later ones are removed.
@@ -2722,6 +2832,7 @@ def _print_resolved_file_refs(ctx: Context, entry: dict) -> None:
     print("---")
 
 
+@_files_locked
 def cmd_file_add(ctx: Context, args: list[str]) -> int:
     """Register a file in the inventory. ``file-add <path> --category C --title T``"""
     label = _resolve_label(args, required=True)
@@ -2862,6 +2973,7 @@ def cmd_file_get(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+@_files_locked
 def cmd_file_move(ctx: Context, args: list[str]) -> int:
     """Move a registered file on disk and update its inventory path. ``file-move <id> <path>``"""
     label = _resolve_label(args, required=True)
@@ -2897,6 +3009,7 @@ def cmd_file_move(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+@_files_locked
 def cmd_file_update(ctx: Context, args: list[str]) -> int:
     """Update a file's category/title/description. ``file-update <id> [--title ...]``"""
     label = _resolve_label(args, required=True)
@@ -2934,6 +3047,7 @@ def cmd_file_update(ctx: Context, args: list[str]) -> int:
     return 0
 
 
+@_files_locked
 def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
     """Recompute sha256 for one file or the whole inventory. ``file-rehash <id>|--all``"""
     label = _resolve_label(args, required=True)

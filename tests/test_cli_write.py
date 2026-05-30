@@ -2669,6 +2669,143 @@ def test_merge_keep_source_deletes_full_block_through_comment(sandbox):
     assert isinstance(target["ptr"], dict)
 
 
+def test_merge_append_sources_folds_descriptions_with_plain_text_headers(sandbox):
+    """--append-sources appends each source's description under a plain-text
+    `## From <id>` header in the target's literal-block description.
+
+    Optional flag from the original spec. Off by default. Headers must NOT be
+    backticked or the validate dangling-ref scanner would flag the
+    soon-to-be-deleted source ids.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    src = _merge_source_entry(description="Source 1 first paragraph.\nSecond paragraph.")
+    sandbox.run("create", stdin=json.dumps(src))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--append-sources",
+        "--confirm",
+    )
+    assert rc == 0
+    desc = sandbox.entry("2026-09-mg-target")["description"]
+    # Original target description survives.
+    assert "Original target description." in desc
+    # Plain-text header (NOT backticked).
+    assert "## From 2026-09-mg-source" in desc
+    assert "`2026-09-mg-source`" not in desc
+    # Source body included.
+    assert "Source 1 first paragraph." in desc
+    assert "Second paragraph." in desc
+    # Default provenance one-liner is still present alongside.
+    assert "Consolidates former entries:" in desc
+    # validate is clean (the plain-text header doesn't dangle).
+    out, _, _ = sandbox.run("validate")
+    assert "DANGLING REF: 2026-09-mg-target" not in out
+
+
+def test_merge_append_sources_off_by_default(sandbox):
+    """Without --append-sources, the target's description is unchanged apart
+    from the optional provenance one-liner."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    src = _merge_source_entry(description="Source body NOT appended.")
+    sandbox.run("create", stdin=json.dumps(src))
+    sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    desc = sandbox.entry("2026-09-mg-target")["description"]
+    assert "Source body NOT appended." not in desc
+    assert "## From " not in desc
+
+
+def test_merge_leaves_target_prose_mentions_of_source_id_alone(sandbox):
+    """Prose mentions of a source id inside the target's own description
+    must not be silently rewritten to self-references.
+
+    Round-2 review finding #8 (deferred to this cleanup PR). rename-id's
+    rewriter is broad by design (every mention everywhere); merge limits
+    that scope so the target's own descriptive prose about a source id
+    survives intact for the human to edit. Self-refs would otherwise be
+    invisible to validate (scan_dangling_refs skips ref == eid).
+    """
+    target = _merge_target_entry(
+        description=(
+            "Original target description.\n"
+            "Originally tracked under 2026-09-mg-source before consolidation."
+        ),
+    )
+    sandbox.run("create", stdin=json.dumps(target))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    desc = sandbox.entry("2026-09-mg-target")["description"]
+    # The prose mention of the source id stays as the user wrote it.
+    assert "2026-09-mg-source before consolidation" in desc
+    # And it did NOT become a self-reference.
+    assert "2026-09-mg-target before consolidation" not in desc
+
+
+# ---------------------------------------------------------------------------
+# write-lock concurrency
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_writers_do_not_clobber_each_other(sandbox):
+    """Two writer processes hammering the same activities file must serialize
+    cleanly: every write must land, none silently lost.
+
+    Pins the cross-process write_lock that wraps read-plan-write. Without it,
+    two writers each reading their own snapshot and writing it back would
+    last-writer-wins one of them.
+    """
+    import subprocess
+    import sys
+
+    # Launch N parallel add-tags invocations against the same entry; each adds
+    # a distinct tag. All N writes must survive.
+    procs = []
+    n = 8
+    full_env = {
+        **sandbox.env,
+        "PATH": "/usr/bin:/bin",
+        "LIBRARIAN_SESSION_LABEL": "test:concurrent",
+    }
+    for i in range(n):
+        procs.append(
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "librarian.cli",
+                    "add-tags",
+                    "2026-04-self-study",
+                    f"concurrent-tag-{i}",
+                ],
+                env=full_env,
+                cwd="/Users/dpittman/git/research/tools/librarian",
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        )
+    for p in procs:
+        p.wait()
+    tags = sandbox.entry("2026-04-self-study")["tags"]
+    for i in range(n):
+        assert f"concurrent-tag-{i}" in tags, (
+            f"tag concurrent-tag-{i} was lost to a concurrent writer"
+        )
+
+
 # ---------------------------------------------------------------------------
 # ledger
 # ---------------------------------------------------------------------------

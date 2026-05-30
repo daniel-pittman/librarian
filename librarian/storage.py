@@ -21,10 +21,29 @@ from __future__ import annotations
 
 import fcntl
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
+
+# Per-thread set of lock-file paths currently held. Lets :class:`write_lock`
+# be reentrant within a single thread: a command can take the lock around its
+# read-plan-write transaction and still call inner helpers like
+# :func:`write_lines` that also use ``write_lock``, without deadlocking on a
+# second ``fcntl.flock(LOCK_EX)`` against a fresh file descriptor to the same
+# lock file. Different threads / processes still contend exclusively.
+_held_locks = threading.local()
+
+
+def _currently_held_locks() -> set[str]:
+    """Return (creating on demand) the per-thread set of held lock-file paths."""
+    held = getattr(_held_locks, "set", None)
+    if held is None:
+        held = set()
+        _held_locks.set = held
+    return held
+
 
 # ---------------------------------------------------------------------------
 # YAML loading
@@ -65,23 +84,42 @@ class write_lock:
 
         with write_lock(paths.activities):
             ...  # critical section
+
+    Reentrant within a single thread: a writer command can wrap its whole
+    read-plan-write transaction in this context and still call inner helpers
+    like :func:`write_lines` (which also use ``write_lock``). The first
+    ``__enter__`` acquires the OS-level lock; nested ``__enter__`` calls are
+    bookkeeping-only and release nothing on ``__exit__`` until the
+    outermost frame exits. Across threads or processes, exclusivity holds.
     """
 
     def __init__(self, resource_path: Path):
         self._lock_path = resource_path.with_suffix(resource_path.suffix + ".lock")
+        self._lock_key = str(self._lock_path)
         self._fh = None
+        self._was_held = False
 
     def __enter__(self) -> write_lock:
+        held = _currently_held_locks()
+        if self._lock_key in held:
+            # Already held by an outer frame on this thread; treat as a no-op
+            # acquire/release pair.
+            self._was_held = True
+            return self
         # Ensure the parent directory exists so the lock file can be created.
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = open(self._lock_path, "w")
         fcntl.flock(self._fh, fcntl.LOCK_EX)
+        held.add(self._lock_key)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        if self._was_held:
+            return False
         if self._fh is not None:
             fcntl.flock(self._fh, fcntl.LOCK_UN)
             self._fh.close()
+            _currently_held_locks().discard(self._lock_key)
         return False  # never suppress exceptions
 
 

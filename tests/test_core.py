@@ -123,6 +123,79 @@ def test_scan_dangling_refs_skips_hex_tokens_without_hyphens():
     assert findings == [], f"hex tokens were incorrectly flagged: {findings}"
 
 
+def test_scan_dangling_refs_skips_historical_originally_tracked():
+    """A backticked former-id preceded by 'Originally tracked under' is
+    historical context, not a dangling reference. Spec follow-up: soften the
+    scanner so consolidated/renamed history doesn't surface as broken links."""
+    activities = [
+        _entry(
+            "2026-09-merged",
+            description=(
+                "Active record. Originally tracked under `2024-old-id` before consolidation."
+            ),
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-merged"}, text_fields=_DESC)
+    assert findings == [], f"historical mention was wrongly flagged: {findings}"
+
+
+def test_scan_dangling_refs_skips_historical_previously_known_as():
+    """'Previously known as `id`' is historical context."""
+    activities = [
+        _entry(
+            "2026-09-renamed",
+            description="Previously known as `2024-legacy-id`.",
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-renamed"}, text_fields=_DESC)
+    assert findings == []
+
+
+def test_scan_dangling_refs_skips_historical_consolidated_from():
+    """'Consolidated from `id`' is historical context (the merge use case)."""
+    activities = [
+        _entry(
+            "2026-09-merged",
+            description="Consolidated from `2024-source-a` and `2024-source-b`.",
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-merged"}, text_fields=_DESC)
+    assert findings == []
+
+
+def test_scan_dangling_refs_still_catches_plain_dangling_after_softening():
+    """A backticked id with NO historical-context phrase nearby is still
+    flagged. The softening must not blanket-suppress every dangling ref."""
+    activities = [
+        _entry(
+            "2026-09-real",
+            description="Related to `2024-bogus-ref` for context.",
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-real"}, text_fields=_DESC)
+    assert findings, "real dangling ref should still be flagged"
+    assert findings[0][1] == "2024-bogus-ref"
+
+
+def test_scan_dangling_refs_historical_phrase_window_is_local():
+    """A historical phrase too far away (>200 chars before the backtick)
+    must NOT suppress a dangling ref — otherwise stray context anywhere in
+    a long description would silently hide real broken links."""
+    far_away_filler = "noise " * 100  # ~600 chars
+    activities = [
+        _entry(
+            "2026-09-real",
+            description=(
+                "Originally tracked elsewhere. "
+                + far_away_filler
+                + "Related to `2024-bogus-ref` for context."
+            ),
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-real"}, text_fields=_DESC)
+    assert findings, "a far-away historical phrase must not hide a dangling ref"
+
+
 # ---------------------------------------------------------------------------
 # extract_contacts — rolodex name-walk-back boundary behavior
 # ---------------------------------------------------------------------------
