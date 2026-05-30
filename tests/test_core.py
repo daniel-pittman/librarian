@@ -239,6 +239,39 @@ def test_scan_dangling_refs_historical_phrase_window_is_local():
     assert findings, "a far-away historical phrase must not hide a dangling ref"
 
 
+def test_scan_dangling_refs_does_not_suppress_on_bare_was_named_or_old_id():
+    """The bare alternatives ``was named``, ``old id`` and ``former(ly) id``
+    used to live in the historical-phrase regex. They were too generic —
+    "the function was named X" or "the old id-pattern" in narrative prose
+    would silently suppress a real dangling ref in the same window.
+
+    Round-4 review finding: drop those bare alternatives. Authors with
+    history notes still get coverage through the explicit forms
+    (``previously named``, ``formerly tracked``, etc.).
+    """
+    activities = [
+        _entry(
+            "2026-09-narrative",
+            description=(
+                "The helper was named differently in early drafts. "
+                "See `2024-broken-ref` for the latest review."
+            ),
+        ),
+        _entry(
+            "2026-09-narrative-2",
+            description=(
+                "We changed the old id-resolution path last quarter. "
+                "Tracking under `2024-also-broken` now."
+            ),
+        ),
+    ]
+    ids = {"2026-09-narrative", "2026-09-narrative-2"}
+    findings = scan_dangling_refs(activities, ids=ids, text_fields=_DESC)
+    refs = {ref for _, ref, _ in findings}
+    assert "2024-broken-ref" in refs, f"bare 'was named' must not hide a dangling ref: {findings}"
+    assert "2024-also-broken" in refs, f"bare 'old id' must not hide a dangling ref: {findings}"
+
+
 # ---------------------------------------------------------------------------
 # extract_contacts — rolodex name-walk-back boundary behavior
 # ---------------------------------------------------------------------------

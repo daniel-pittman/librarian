@@ -211,10 +211,12 @@ _HISTORICAL_PHRASES_RE = re.compile(
     r"consolidat\w*\s+(?:from|under|into)|"
     r"merged\s+(?:from|into)|"
     r"renamed\s+(?:from|to)|"
-    r"superseded\s+by|"
-    r"old\s+id|"
-    r"former(?:ly)?\s+id|"
-    r"was\s+(?:named|known\s+as)"
+    r"superseded\s+by"
+    # The bare alternatives "old id", "former(ly) id" and "was named/known as"
+    # used to live here. They were too generic — "old id-pattern matched" or
+    # "the function was named" would silently suppress a real dangling ref in
+    # the same window. Authors with a history note can still get coverage via
+    # the explicit forms above ("previously named", "formerly tracked", etc.).
     r")\b",
     re.IGNORECASE,
 )

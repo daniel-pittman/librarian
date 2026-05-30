@@ -2756,6 +2756,42 @@ def test_merge_append_sources_rewrites_cross_source_refs_in_bodies(sandbox):
     assert "DANGLING REF: 2026-09-mg-target" not in out
 
 
+def test_merge_append_sources_rewrites_self_backticks_in_bodies(sandbox):
+    """When --append-sources is on and a source body backticks its OWN id,
+    that backtick must also be rewritten to target_id — once the body lives
+    in the target's description and step 6 deletes the source, the self-ref
+    would otherwise become a dangling backticked reference to a now-missing
+    entry.
+
+    Round-4 review finding: the prior heuristic skipped self-mentions on
+    the (wrong) reasoning that they were the author's own narrative; in
+    fact every backticked source id is a reference to an entry that step 6
+    is about to delete, including self-mentions.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    src = _merge_source_entry(
+        description="See `2026-09-mg-source` in the prior write-up for context.",
+    )
+    out, err, rc = sandbox.run("create", stdin=json.dumps(src))
+    assert rc == 0, f"src create failed: {err}"
+    out, err, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--append-sources",
+        "--confirm",
+    )
+    assert rc == 0, f"merge failed: {err}"
+    desc = sandbox.entry("2026-09-mg-target")["description"]
+    # The self-backtick must be rewritten to target_id.
+    assert "`2026-09-mg-source`" not in desc
+    assert "`2026-09-mg-target`" in desc
+    # validate is clean.
+    out, _, _ = sandbox.run("validate")
+    assert "DANGLING REF: 2026-09-mg-target" not in out
+
+
 def test_merge_rewrites_backticked_source_id_inside_target_range(sandbox):
     """Backticked source-id mentions in the TARGET's prose are live
     cross-references and must be rewritten, even though plain-text mentions
