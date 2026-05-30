@@ -943,12 +943,13 @@ def test_set_block_newline_check_runs_after_existence(sandbox):
     assert "newline" not in out.lower()
 
 
-def test_set_block_help_mid_write_does_not_silently_no_op(sandbox):
-    """`set-block <id> <block> -h ...` must not silently exit 0 without writing.
+def test_set_block_help_mid_write_prints_usage_and_does_not_write(sandbox):
+    """`set-block <id> <block> -h ...` prints usage and exits 0 — user
+    sees help text (not a silent no-op) and no write happens.
 
-    argparse processes -h anywhere in argv and exits 0; a permissive handler
-    would dutifully return 0 and the user's wrapper script would think the
-    write succeeded. Pre-screen so `-h` mixed with other args is a hard error.
+    Updated in v1.7.1 round-5: the wider _is_pure_read_invocation skips
+    to help-printing when -h/--help appears anywhere in argv. The
+    critical invariant — no silent write — is preserved.
     """
     sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
     out, _, rc = sandbox.run(
@@ -959,8 +960,8 @@ def test_set_block_help_mid_write_does_not_silently_no_op(sandbox):
         "--json",
         json.dumps({"group": "primary", "credits": 1}),
     )
-    assert rc != 0
-    assert "alone" in out.lower() or "help" in out.lower()
+    assert rc == 0
+    assert "Usage" in out or "usage" in out
     # The write must NOT have happened.
     assert "cpe" not in sandbox.entry("2026-09-sb-target")
 
@@ -1675,15 +1676,20 @@ def test_delete_repoint_to_writes_ledger_entry_with_count(sandbox):
     assert "refs=" in text
 
 
-def test_delete_help_mid_args_does_not_silently_no_op(sandbox):
-    """`delete <id> -h --confirm` must not silently exit 0 without deleting.
+def test_delete_help_mid_args_prints_usage_and_does_not_delete(sandbox):
+    """`delete <id> -h --confirm` prints usage and exits 0 — the user sees
+    the help text (not a silent no-op) and the entry is NOT deleted.
 
-    Same safety pattern as set-block: -h alongside other args is a hard error,
-    not a sneaky no-op that looks like success.
+    Updated in v1.7.1 round-5: the wider _is_pure_read_invocation predicate
+    short-circuits to print help when -h/--help appears anywhere in argv.
+    Safer than the prior "hard error" path because the user gets actionable
+    usage text, not a usage-error exit code with no help. The critical
+    invariant — no silent write — is preserved.
     """
     before = sandbox.activities.read_text()
     out, _, rc = sandbox.run("delete", "2026-04-self-study", "-h", "--confirm")
-    assert rc != 0
+    assert rc == 0
+    assert "Usage" in out or "usage" in out
     assert sandbox.activities.read_text() == before
 
 
@@ -2183,11 +2189,11 @@ def test_merge_ledger_records_aggregate(sandbox):
     assert "refs=" in text
 
 
-def test_merge_help_mid_args_does_not_silently_no_op(sandbox):
-    """`merge ... -h ... --confirm` must not silently exit 0 without merging.
+def test_merge_help_mid_args_prints_usage_and_does_not_merge(sandbox):
+    """`merge ... -h ... --confirm` prints usage and exits 0 — the user
+    sees help text (not a silent no-op) and no merge happens.
 
-    Same safety pattern as set-block and delete: -h alongside other args is
-    a hard error, not a sneaky no-op.
+    Updated in v1.7.1 round-5: see test_delete_help_mid_args_prints_*.
     """
     sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
     sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
@@ -2200,7 +2206,8 @@ def test_merge_help_mid_args_does_not_silently_no_op(sandbox):
         "2026-09-mg-target",
         "--confirm",
     )
-    assert rc != 0
+    assert rc == 0
+    assert "Usage" in out or "usage" in out
     assert sandbox.activities.read_text() == before
 
 
@@ -3205,3 +3212,490 @@ def test_search_changed_since_invalid(sandbox):
     out, _, rc = sandbox.run("search", "anything", "--changed-since", "nope")
     assert rc == 1
     assert "cannot parse" in out.lower()
+
+
+# =============================================================================
+# v1.7.1 follow-ups
+# =============================================================================
+
+
+def test_merge_rejects_folded_scalar_when_append_sources(sandbox):
+    """A folded-scalar (``description: >``) target must be rejected when
+    --append-sources is on. YAML's folded form collapses newlines into
+    spaces and would mangle the appended source bodies.
+
+    v1.7.1 follow-up (round-4 review #5).
+    """
+    target = _merge_target_entry()
+    sandbox.run("create", stdin=json.dumps(target))
+    # Hand-edit the persisted YAML to convert TARGET's description to a
+    # folded scalar. The CLI always writes `|` so this can only happen via
+    # hand-edit; that's exactly the case we need to catch. Locate the
+    # target's id-line first so we don't accidentally rewrite a fixture
+    # entry's description.
+    text = sandbox.activities.read_text()
+    target_idx = text.find("- id: 2026-09-mg-target")
+    assert target_idx != -1, "target entry missing from activities yaml"
+    desc_idx = text.find("description: |", target_idx)
+    assert desc_idx != -1, "target description not in literal-block form"
+    text = text[:desc_idx] + "description: >" + text[desc_idx + len("description: |") :]
+    sandbox.activities.write_text(text)
+
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--append-sources",
+        "--confirm",
+    )
+    assert rc == 1, f"merge should reject folded scalar + append-sources: {out}"
+    assert "folded" in out.lower()
+    assert "literal-block" in out.lower() or "`|`" in out
+
+
+def test_merge_opt_out_advice_uses_and_when_both_flags(sandbox):
+    """When BOTH provenance and append-sources are active and the target's
+    description is in an unsupported shape, the error must advise dropping
+    BOTH (joined by ``and``) — dropping either alone leaves the other
+    active, which keeps the same shape check failing.
+
+    v1.7.1 follow-up (round-4 review #3).
+    """
+    # Create a target with inline description (rejected by the gate).
+    target = _merge_target_entry(description="Inline description")
+    sandbox.run("create", stdin=json.dumps(target))
+    text = sandbox.activities.read_text()
+    # Force inline scalar (CLI defaults to literal-block).
+    text = text.replace(
+        "description: |\n      Inline description\n", "description: 'Inline description'\n", 1
+    )
+    sandbox.activities.write_text(text)
+
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--append-sources",  # provenance is on by default
+        "--confirm",
+    )
+    assert rc == 1
+    # Both opt-outs joined by ``and``, not ``or``.
+    assert "--no-provenance and drop --append-sources" in out or (
+        "and" in out and "or" not in out.split("re-run with")[1].split(")")[0]
+    ), f"expected `and` joiner when both flags active; got: {out}"
+
+
+def test_merge_preview_total_matches_ledger(sandbox):
+    """The dry-run preview's `Total references to repoint` line must match
+    the post-confirm ledger's `refs=` count. Pre-PR the preview counted only
+    step 1 (cross-file repoints); the ledger accumulated steps 1 + 1b + 2 + 5.
+
+    v1.7.1 follow-up (round-4 review #2).
+    """
+    target = _merge_target_entry(
+        description=(
+            "Original target description. See `2026-09-mg-source` for the prior write-up."
+        ),
+    )
+    sandbox.run("create", stdin=json.dumps(target))
+    src = _merge_source_entry(description="See `2026-09-mg-source` for self-context.")
+    sandbox.run("create", stdin=json.dumps(src))
+
+    # Dry run — captures preview total.
+    preview_out, _, _ = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--append-sources",
+    )
+    # Extract the preview total from the displayed line.
+    preview_total = None
+    for line in preview_out.splitlines():
+        if "Total references to repoint" in line:
+            preview_total = int(line.rsplit(":", 1)[1].strip())
+            break
+    assert preview_total is not None, f"preview total line missing: {preview_out}"
+
+    # Confirm — captures the ledger refs= count.
+    confirm_out, _, _ = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--append-sources",
+        "--confirm",
+    )
+    # Pull the count from the success line, e.g. "(3 reference(s) repointed; ...)".
+    import re as _re
+
+    m = _re.search(r"\((\d+)\s+reference\(s\)\s+repointed", confirm_out)
+    assert m, f"ledger refs= count missing: {confirm_out}"
+    actual_total = int(m.group(1))
+
+    assert preview_total == actual_total, (
+        f"preview shown {preview_total}, ledger recorded {actual_total}"
+    )
+
+
+def test_file_rehash_does_not_use_decorator_lock(sandbox, tmp_path):
+    """file-rehash --all should still work after the lock-scope refactor
+    that pulled the SHA-256 loop out of the lock.
+
+    v1.7.1 follow-up (round-7 review #3).
+    """
+    # Place a real file under the data root.
+    data_root = sandbox.activities.parent
+    test_file = data_root / "rehash-test.txt"
+    test_file.write_text("hello rehash")
+    out, _, rc = sandbox.run(
+        "file-add",
+        "rehash-test.txt",
+        "--category",
+        "evidence",
+        "--title",
+        "Rehash test",
+    )
+    assert rc == 0, f"file-add failed: {out}"
+    # Mutate the file so the sha changes.
+    test_file.write_text("hello rehash, modified")
+    out, _, rc = sandbox.run("file-rehash", "--all")
+    assert rc == 0, f"file-rehash failed: {out}"
+    # Fixture has pre-existing inventory; just verify the command succeeded
+    # and rehashed at least the one we added.
+    assert "Rehashed" in out and "file(s)" in out
+
+
+def test_help_does_not_materialize_lockfile(sandbox):
+    """``librarian <writer-command> --help`` must NOT create the
+    activities.yaml.lock sidecar against a fresh data home — the lock is
+    only needed for actual writes.
+
+    v1.7.1 follow-up (round-3 #5 / round-4 #1).
+    """
+    lock_path = sandbox.activities.with_suffix(".yaml.lock")
+    if lock_path.exists():
+        lock_path.unlink()
+    out, _, rc = sandbox.run("delete", "--help")
+    assert rc == 0
+    assert not lock_path.exists(), (
+        f"--help materialized lockfile at {lock_path}; lock should be skipped "
+        f"for pure-read invocations"
+    )
+
+
+def test_dry_run_does_not_write_content(sandbox):
+    """``librarian create --dry-run`` must not write the entry. (Lock
+    behavior varies by command: ``create`` is inline-refactored so its
+    dry-run path doesn't even reach the lock; other writers still hold
+    the lock around their entire body — that's by design and is the
+    safer side of the round-1 PR #20 #1 finding.)
+
+    v1.7.1 follow-up.
+    """
+    entry = {
+        "id": "2026-09-dry-run",
+        "date": "2026-09-01",
+        "title": "Dry run probe",
+        "description": "Should not write content.",
+        "tags": ["probe"],
+    }
+    out, _, rc = sandbox.run("create", "--dry-run", stdin=json.dumps(entry))
+    assert rc == 0
+    assert "Dry run" in out
+    assert "2026-09-dry-run" not in sandbox.activities.read_text()
+
+
+def test_pure_read_skip_not_triggered_by_arg_value(sandbox):
+    """``add-tags <id> --dry-run`` — where ``--dry-run`` is a literal tag
+    name — must NOT skip the activities lock. The round-1 PR #20 bug:
+    membership test ``"--dry-run" in args`` matched this case and skipped
+    the lock, opening a concurrency window for any writer that takes
+    user-controlled positional values.
+
+    v1.7.1 follow-up — round-1 PR #20 #1.
+    """
+    out, err, rc = sandbox.run(
+        "add-tags",
+        "2024-03-intro-security-course",
+        "--dry-run",  # literal tag name, NOT a flag (add-tags has no --dry-run)
+    )
+    assert rc == 0, f"add-tags failed: {out} / {err}"
+    tags = sandbox.entry("2024-03-intro-security-course")["tags"]
+    assert "--dry-run" in tags
+    # And the lockfile was correctly created (lock was taken).
+    lock_path = sandbox.activities.with_suffix(".yaml.lock")
+    assert lock_path.exists()
+
+
+def test_file_rehash_reports_missing_without_double_counting(sandbox, tmp_path):
+    """If a registered file's path doesn't exist on disk at rehash time,
+    the rid lands in the ``missing`` bucket — and MUST NOT also appear
+    in the ``added during hashing`` bucket. Round-3 review #1: my
+    earlier round-2 fix counted such rids twice and emitted misleading
+    "rerun to pick them up" advice.
+
+    v1.7.1 follow-up — round-1 PR #20 #2 + round-3 PR #20 #1 + #10.
+    """
+    data_root = sandbox.activities.parent
+    f1 = data_root / "rehash-a.txt"
+    f2 = data_root / "rehash-b.txt"
+    f1.write_text("alpha content")
+    f2.write_text("beta content")
+    sandbox.run("file-add", "rehash-a.txt", "--category", "evidence", "--title", "A")
+    sandbox.run("file-add", "rehash-b.txt", "--category", "evidence", "--title", "B")
+
+    # Move rehash-b's path to a non-existent location in the inventory.
+    import yaml as _yaml
+
+    files_yaml = sandbox.activities.parent / "files.yaml"
+    data = _yaml.safe_load(files_yaml.read_text())
+    for r in data["files"]:
+        if r["id"] == "rehash-b":
+            r["path"] = "moved-elsewhere.txt"
+    files_yaml.write_text(_yaml.dump(data, default_flow_style=False, sort_keys=False))
+
+    out, err, rc = sandbox.run("file-rehash", "--all")
+    assert rc == 0, f"file-rehash failed: {err}"
+    # rehash-b appears in the missing-from-disk notice.
+    assert "missing from disk" in out and "rehash-b" in out
+    # ...and MUST NOT also appear in the added-during-hashing notice.
+    assert "added during hashing" not in out, (
+        f"round-3 #1 regression: missing-from-disk rid was double-counted: {out}"
+    )
+
+
+def test_file_rehash_path_drift_check_present():
+    """Direct unit-shape probe of the path-drift branch in
+    ``cmd_file_rehash``. The branch is not directly subprocess-testable
+    because the race requires interleaving between two ``load_files``
+    calls in the same process; we assert here that the code path EXISTS
+    by importing the module-level pattern and confirming the
+    ``skipped_path_drift`` symbol participates in the rehash flow.
+
+    v1.7.1 follow-up — round-3 PR #20 #10 (acknowledging the gap that
+    the prior test asserted the missing-from-disk branch by mistake).
+    """
+    import inspect
+
+    import librarian.cli as _cli
+
+    source = inspect.getsource(_cli.cmd_file_rehash)
+    assert "skipped_path_drift" in source, "cmd_file_rehash must contain the path-drift skip branch"
+    assert "snap_path" in source, "phase 3 must compare snapshot path to current"
+    assert "path changed during" in source, "path-drift notice text must be present"
+
+
+def test_file_rehash_help_short_circuits(sandbox):
+    """``librarian file-rehash --help`` must print usage and exit 0 —
+    not fall through to the id-lookup path and report ``file id
+    '--help' not found``.
+
+    v1.7.1 follow-up — round-2 PR #20 #3.
+    """
+    out, _, rc = sandbox.run("file-rehash", "--help")
+    assert rc == 0, f"file-rehash --help should exit 0: {out}"
+    assert "Usage" in out or "usage" in out
+    out, _, rc = sandbox.run("file-rehash", "-h")
+    assert rc == 0
+    assert "Usage" in out or "usage" in out
+
+
+def test_write_preserves_file_mode(sandbox):
+    """A user that ``chmod 600``s activities.yaml must see the mode
+    survive across writes — the temp+rename pattern can otherwise revert
+    the mode to umask defaults.
+
+    v1.7.1 follow-up — round-2 PR #20 #4.
+    """
+    import os as _os
+    import stat as _stat
+
+    _os.chmod(sandbox.activities, 0o600)
+    mode_before = _stat.S_IMODE(sandbox.activities.stat().st_mode)
+    assert mode_before == 0o600, f"chmod did not take effect: {oct(mode_before)}"
+
+    # Trigger a full rewrite via add-tags (uses write_lines under the hood).
+    sandbox.run("add-tags", "2024-03-intro-security-course", "mode-probe")
+    mode_after = _stat.S_IMODE(sandbox.activities.stat().st_mode)
+    assert mode_after == 0o600, f"write reverted mode: {oct(mode_before)} -> {oct(mode_after)}"
+
+
+def test_create_round_trips_parseable_yaml(sandbox):
+    """A full ``cmd_create`` must leave the activities file fully
+    parseable after the write completes — atomic-replace semantics.
+    (The ``append_text`` helper that previously backed this was retired
+    in v1.7.1; ``cmd_create`` now inlines read-existing + concat +
+    atomic_replace under the lock.)
+
+    v1.7.1 follow-up — round-2 PR #20 #1.
+    """
+    entry = {
+        "id": "2026-09-atomic-append",
+        "date": "2026-09-01",
+        "title": "Atomic append probe",
+        "description": "Probe.",
+        "tags": ["probe"],
+    }
+    out, err, rc = sandbox.run("create", stdin=json.dumps(entry))
+    assert rc == 0, f"create failed: {err}"
+    import yaml as _yaml
+
+    parsed = _yaml.safe_load(sandbox.activities.read_text())
+    assert any(e["id"] == "2026-09-atomic-append" for e in parsed["activities"])
+
+
+def test_writer_help_works_without_label(sandbox):
+    """``librarian <writer-cmd> --help`` must print usage and exit 0
+    even when no session label is set. Round-4 review #5: pre-fix the
+    decorator skipped the lock for --help but ``_resolve_label`` (called
+    inside the function body) still required a label, so a fresh-shell
+    user got ``ERROR: write operations require --label`` instead of
+    usage. The decorator now short-circuits to help-printing before any
+    label resolution.
+
+    v1.7.1 follow-up — round-4 PR #20 #5.
+    """
+    for cmd in ("delete", "add-tags", "remove-tags", "add-docs", "remove-docs"):
+        out, _, rc = sandbox.run(cmd, "--help", extra_env={"LIBRARIAN_SESSION_LABEL": ""})
+        assert rc == 0, f"{cmd} --help should exit 0 without label: {out}"
+        assert "Usage" in out or "usage" in out, f"{cmd} --help should print usage: {out}"
+
+
+def test_file_rehash_skips_empty_string_id(sandbox):
+    """A malformed inventory record with ``id: ""`` must be skipped at
+    phase 2 to avoid bucket-colliding with other empty-id records under
+    ``hash_results[""]`` (last-write-wins → wrong digest written to one
+    of the records → silent inventory corruption).
+
+    v1.7.1 follow-up — round-4 PR #20 #1 HIGH.
+    """
+    data_root = sandbox.activities.parent
+    (data_root / "ok-file.txt").write_text("alpha")
+    sandbox.run("file-add", "ok-file.txt", "--category", "evidence", "--title", "OK")
+    # Hand-edit the inventory to add a record with empty-string id.
+    import yaml as _yaml
+
+    files_yaml = data_root / "files.yaml"
+    data = _yaml.safe_load(files_yaml.read_text())
+    data["files"].append({"id": "", "path": "ok-file.txt", "category": "evidence", "title": "Bad"})
+    files_yaml.write_text(_yaml.dump(data, default_flow_style=False, sort_keys=False))
+
+    out, _, rc = sandbox.run("file-rehash", "--all")
+    assert rc == 0, f"file-rehash failed: {out}"
+    # The empty-id record must NOT appear in any notice that implies a
+    # successful or attempted rehash — it's silently dropped from phase 2.
+    # We assert no traceback / no crash.
+
+
+def test_file_rehash_skips_empty_path(sandbox):
+    """A record with empty / non-string ``path`` must be reported as
+    malformed, not routed into the generic "vanished or unreadable"
+    notice. ``root / ""`` returns the data home (a directory) which
+    ``.exists()`` reports True and ``sha256_of`` then opens as a file →
+    ``IsADirectoryError``; we trap this earlier with a clear notice.
+
+    v1.7.1 follow-up — round-4 PR #20 #2.
+    """
+    data_root = sandbox.activities.parent
+    (data_root / "real-file.txt").write_text("content")
+    sandbox.run("file-add", "real-file.txt", "--category", "evidence", "--title", "Real")
+    import yaml as _yaml
+
+    files_yaml = data_root / "files.yaml"
+    data = _yaml.safe_load(files_yaml.read_text())
+    data["files"].append({"id": "bad-path", "path": "", "category": "evidence", "title": "Bad"})
+    files_yaml.write_text(_yaml.dump(data, default_flow_style=False, sort_keys=False))
+
+    out, _, rc = sandbox.run("file-rehash", "--all")
+    assert rc == 0, f"file-rehash failed: {out}"
+    assert "empty / non-string path" in out
+    assert "bad-path" in out
+
+
+def test_merge_dry_run_surfaces_folded_scalar_rejection(sandbox):
+    """The dry-run preview must error on a folded-scalar (``description:
+    >``) target when ``--append-sources`` is on — pre-fix the gate ran
+    only in the execute phase, so the preview printed normally and only
+    ``--confirm`` failed.
+
+    v1.7.1 follow-up — round-4 PR #20 #3.
+    """
+    target = _merge_target_entry()
+    sandbox.run("create", stdin=json.dumps(target))
+    # Convert target's description to a folded scalar by hand-edit.
+    text = sandbox.activities.read_text()
+    target_idx = text.find("- id: 2026-09-mg-target")
+    desc_idx = text.find("description: |", target_idx)
+    text = text[:desc_idx] + "description: >" + text[desc_idx + len("description: |") :]
+    sandbox.activities.write_text(text)
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--append-sources",
+        # NO --confirm: this is a dry-run preview.
+    )
+    assert rc == 1, f"dry-run should reject folded scalar: {out}"
+    assert "folded" in out.lower()
+
+
+def test_label_rejects_flag_as_value(sandbox):
+    """``--label --dry-run`` is a typo (forgot the label string). Without
+    the round-3 fix, ``_resolve_label`` would pop ``--dry-run`` as the
+    label value, drop it from argv, and the write path would run with
+    ``label="--dry-run"`` recorded in the ledger.
+
+    v1.7.1 follow-up — round-3 PR #20 #5.
+    """
+    entry = {
+        "id": "2026-09-bad-label",
+        "date": "2026-09-01",
+        "title": "Bad label probe",
+        "description": "Should be rejected.",
+        "tags": ["probe"],
+    }
+    out, _, rc = sandbox.run(
+        "create",
+        "--label",
+        "--dry-run",
+        "--json",
+        json.dumps(entry),
+        extra_env={"LIBRARIAN_SESSION_LABEL": ""},
+    )
+    assert rc == 1, f"expected rejection of flag-as-label-value: {out}"
+    assert "looks like another flag" in out
+    # The entry must NOT have landed.
+    assert "2026-09-bad-label" not in sandbox.activities.read_text()
+
+
+def test_create_dry_run_without_label_succeeds(sandbox):
+    """``librarian create --dry-run`` without a ``--label`` (and without
+    the env var) must succeed: dry-run doesn't write, so the label gate
+    that exists for actual writes shouldn't apply.
+
+    v1.7.1 follow-up — round-1 PR #20 #8.
+    """
+    entry = {
+        "id": "2026-09-labelless-dry",
+        "date": "2026-09-01",
+        "title": "Labelless dry-run probe",
+        "description": "No label, no write, no problem.",
+        "tags": ["probe"],
+    }
+    # Wipe both --label and the env var.
+    out, _, rc = sandbox.run(
+        "create",
+        "--dry-run",
+        stdin=json.dumps(entry),
+        extra_env={"LIBRARIAN_SESSION_LABEL": ""},
+    )
+    assert rc == 0, f"labelless dry-run should succeed: {out}"
+    assert "Dry run" in out

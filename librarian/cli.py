@@ -59,7 +59,7 @@ from .paths import LibrarianPaths, resolve_paths
 from .schema import Schema, SchemaError, coerce_value, load_schema, validate_block
 from .storage import (
     append_ledger,
-    append_text,
+    atomic_replace,
     find_entry_line_range,
     line_indent,
     load_activities,
@@ -109,19 +109,71 @@ def build_context(env: dict[str, str] | None = None) -> Context:
 # =============================================================================
 
 
+def _is_pure_read_invocation(args: list[str]) -> bool:
+    """True when ``args`` clearly won't reach a write path.
+
+    Matches ``-h`` / ``--help`` anywhere in argv. Safe because the
+    decorator's response is to PRINT HELP AND RETURN 0 (via
+    :func:`_print_help_for`), not to skip the lock and run the writer
+    function — so even if a user types ``add-tags my-id --help`` intending
+    ``--help`` as a literal tag value, no write happens. (Users who
+    really need ``--help`` as a tag must use a different value; ``--help``
+    is reserved.)
+
+    NOT matched: ``--dry-run``. Several writers accept arbitrary
+    positional values and DON'T route them through argparse — a tag named
+    ``--dry-run`` is legitimate and must take the lock to avoid a
+    cross-process atomicity hole.
+    """
+    return "-h" in args or "--help" in args
+
+
+def _print_help_for(func) -> int:
+    """Print the help text for a decorated writer command and return 0.
+
+    Used by the decorator when ``-h`` / ``--help`` is the only arg —
+    short-circuits past ``_resolve_label`` so a user running
+    ``librarian <writer-cmd> --help`` against a fresh shell (no
+    ``LIBRARIAN_SESSION_LABEL`` env var, no ``--label`` flag) sees usage
+    rather than ``ERROR: write operations require --label``.
+    """
+    name = func.__name__.removeprefix("cmd_").replace("_", "-")
+    print(f"Usage: librarian {name}")
+    if func.__doc__:
+        # Render the docstring as-is; module-level commands all keep a
+        # single-paragraph signature on the first line that suffices for
+        # ``--help`` discovery.
+        print()
+        print(func.__doc__.strip())
+    return 0
+
+
 def _activities_locked(func):
     """Take ``write_lock(ctx.paths.activities)`` around the whole command.
 
     Wraps a writer command so its read-plan-write transaction is exclusive
     across processes: ``read_lines`` / ``load_activities`` and the eventual
-    ``write_lines`` / ``append_text`` happen under the same fcntl flock, so
-    a concurrent writer cannot clobber a multi-step operation mid-flight.
-    The lock is reentrant within a single thread, so the inner write helpers
-    (which also use ``write_lock``) compose cleanly.
+    ``write_lines`` happen under the same fcntl flock, so a concurrent
+    writer cannot clobber a multi-step operation mid-flight. The lock is
+    reentrant within a single thread, so the inner write helpers (which
+    also use ``write_lock``) compose cleanly.
+
+    Pure-read invocations (``<cmd> --help`` / ``<cmd> -h``) skip the lock
+    AND short-circuit straight to help output via :func:`_print_help_for`,
+    bypassing the wrapped function's ``_resolve_label`` call. This closes
+    the round-4 #5 trap where ``--help`` ran ``_resolve_label`` first and
+    aborted with ``ERROR: write operations require --label`` against a
+    fresh shell with no session-label env var set.
+
+    Commands that do expensive work outside the lock (stdin reads, large
+    similarity scans, large hashing loops) drop the decorator and use
+    explicit ``with write_lock(...):`` around just the write phase.
     """
 
     @functools.wraps(func)
     def wrapper(ctx: Context, args: list[str]) -> int:
+        if _is_pure_read_invocation(args):
+            return _print_help_for(func)
         with write_lock(ctx.paths.activities):
             return func(ctx, args)
 
@@ -129,10 +181,16 @@ def _activities_locked(func):
 
 
 def _files_locked(func):
-    """Like :func:`_activities_locked` but for file-inventory writers."""
+    """Like :func:`_activities_locked` but for file-inventory writers.
+
+    Same pure-read short-circuit semantics: ``<cmd> --help`` / ``-h`` skip
+    both the lock AND the wrapped function's ``_resolve_label`` call.
+    """
 
     @functools.wraps(func)
     def wrapper(ctx: Context, args: list[str]) -> int:
+        if _is_pure_read_invocation(args):
+            return _print_help_for(func)
         with write_lock(ctx.paths.files):
             return func(ctx, args)
 
@@ -147,11 +205,47 @@ def _resolve_label(args: list[str], *, required: bool = True) -> str | None:
     ``None`` so the caller can abort.
     """
     label = None
-    if "--label" in args:
+    # Pop the equals-form ``--label=foo`` first (R5 #10). One pass so a
+    # duplicate equals-form is caught by the post-loop duplicate check.
+    eq_positions = [i for i, a in enumerate(args) if a.startswith("--label=")]
+    for i in reversed(eq_positions):
+        candidate = args[i].split("=", 1)[1]
+        args.pop(i)
+        if not candidate:
+            print("ERROR: --label= requires a value after the '='")
+            sys.exit(1)
+        if label is None:
+            label = candidate
+        else:
+            print("ERROR: --label specified more than once")
+            sys.exit(1)
+    # Now the space-form ``--label foo``. Loop so duplicates raise (R5 #6).
+    while "--label" in args:
         i = args.index("--label")
-        if i + 1 < len(args):
-            label = args[i + 1]
-            args.pop(i + 1)
+        if i + 1 >= len(args):
+            # Trailing ``--label`` with no value (R5 #9). Reject explicitly
+            # rather than silently dropping and falling through to the
+            # "missing label" error — that hides the typo.
+            print("ERROR: --label requires a value (the flag was at the end of argv)")
+            sys.exit(1)
+        candidate = args[i + 1]
+        # Reject another flag as the label value. Without this guard a
+        # typo like ``--label --dry-run --json '...'`` silently swallows
+        # ``--dry-run`` as the label, drops it from argv, and the write
+        # path then runs with ``label="--dry-run"`` — defeating the
+        # dry-run intent and tagging the ledger with a bogus label.
+        if candidate.startswith("-"):
+            print(
+                f"ERROR: --label requires a value (got '{candidate}', "
+                f"which looks like another flag). Format: "
+                f"<context>:<short-purpose>, e.g. 'cli:main-curator'"
+            )
+            sys.exit(1)
+        if label is not None:
+            print("ERROR: --label specified more than once")
+            sys.exit(1)
+        label = candidate
+        args.pop(i + 1)
         args.pop(i)
     if not label:
         label = os.environ.get("LIBRARIAN_SESSION_LABEL")
@@ -1180,21 +1274,36 @@ def _scan_list_items(
     return items, first, last
 
 
-@_activities_locked
 def cmd_create(ctx: Context, args: list[str]) -> int:
     """Create a new entry from JSON on stdin or ``--json``. ``create [--json ...]``
 
     Required fields: ``id``, ``date``, ``title``, ``description``, ``tags``.
     Optional: ``end_date``, ``docs`` and any schema block. Schema blocks present
     in the input are validated before the entry is written.
+
+    NOTE: does NOT use ``@_activities_locked``. The expensive operations —
+    JSON-stdin read and the O(N) fuzzy-similarity scan over every entry —
+    happen OUTSIDE the lock; only the short uniqueness-recheck + append +
+    ledger phase is locked. A concurrent writer can land between the
+    pre-lock fuzzy scan and the locked append; the re-check inside the lock
+    catches a same-id collision and aborts cleanly.
     """
-    label = _resolve_label(args, required=True)
-    if label is None:
-        return 1
+    # Don't require --label yet; a dry-run never writes and shouldn't be
+    # gated by the label requirement. We re-check after argparse below.
+    label = _resolve_label(args, required=False)
     parser = argparse.ArgumentParser(prog="librarian create")
     parser.add_argument("--json", help="entry as a JSON string")
     parser.add_argument("--dry-run", action="store_true")
     parsed = parser.parse_args(args)
+    if not parsed.dry_run and not label:
+        # Actual write — label is mandatory. Emit the same advice
+        # ``_resolve_label`` would have produced.
+        print(
+            "ERROR: write operations require --label LABEL or the "
+            "LIBRARIAN_SESSION_LABEL env var.\n"
+            "       Format: <context>:<short-purpose>, e.g. 'cli:main-curator'"
+        )
+        return 1
 
     if parsed.json:
         data = json.loads(parsed.json)
@@ -1226,12 +1335,12 @@ def cmd_create(ctx: Context, args: list[str]) -> int:
             print(f"ERROR: docs_optional {exc}")
             return 1
 
+    # Pre-lock pass — load entries once for fuzzy duplicate warning + block
+    # validation + indent detection + YAML render. None of these mutate.
     _, activities = load_activities(ctx.paths.activities)
-    if data["id"] in {e.get("id") for e in activities}:
-        print(f"ERROR: entry with id '{data['id']}' already exists")
-        return 1
 
-    # Validate any schema blocks present on the new entry.
+    # Schema-block validation uses only ctx.schema, not the loaded entries,
+    # so it's safe outside the lock.
     for block in ctx.schema.blocks:
         if block.name in data:
             block_issues = validate_block(block, data[block.name] or {})
@@ -1241,7 +1350,19 @@ def cmd_create(ctx: Context, args: list[str]) -> int:
                     print(f"  {issue}")
                 return 1
 
-    # Fuzzy duplicate warning (non-blocking).
+    # Pre-lock id-existence check: short-circuits the common case ("already
+    # tracked") without taking the lock. The post-lock re-check is the
+    # authoritative one and handles the concurrent-writer race.
+    if data["id"] in {e.get("id") for e in activities}:
+        print(f"ERROR: entry with id '{data['id']}' already exists")
+        return 1
+
+    # Fuzzy duplicate warning (non-blocking; informational only). Note this
+    # scan operates on the PRE-LOCK snapshot, so a near-duplicate landed by
+    # a concurrent writer between the snapshot and the locked append won't
+    # appear in the warning. That's an acceptable trade for not holding the
+    # lock through the O(N) similarity scan — the warning is advisory and
+    # a hard id-collision is still caught by the post-lock re-check.
     query_text = f"{data.get('title', '')} {data.get('description', '')}"
     similar = sorted(
         ((best_similarity(query_text, e), e) for e in activities),
@@ -1257,9 +1378,11 @@ def cmd_create(ctx: Context, args: list[str]) -> int:
             )
         print()
 
-    # Match the indentation style of existing entries so the appended YAML
-    # stays parseable. If the file already has `- id:` lines, copy their
-    # indent; otherwise default to 2-space (the style of a fresh file).
+    # Pre-render with a tentative indent for the dry-run preview. The
+    # authoritative indent is re-detected INSIDE the lock so a peer
+    # cmd_create that landed an indent-4 entry between our snapshot and
+    # our locked write can't make us emit an indent-2 entry into an
+    # indent-4 file (which would be invalid YAML).
     indent = _detect_entry_indent(ctx.paths)
     yaml_text = _render_entry(ctx, data, indent=indent)
     if parsed.dry_run:
@@ -1267,14 +1390,35 @@ def cmd_create(ctx: Context, args: list[str]) -> int:
         print(yaml_text)
         return 0
 
-    ctx.paths.ensure_home()
-    # Ensure the file starts with an `activities:` key on first use.
-    if not ctx.paths.activities.exists():
-        ctx.paths.activities.write_text("activities:\n", encoding="utf-8")
-    append_text(ctx.paths.activities, "\n" + yaml_text)
-    append_ledger(
-        ctx.paths.ledger, "create", data["id"], label, details=f"tags={len(data['tags'])}"
-    )
+    # Lock-protected write. Re-load activities to absorb any concurrent
+    # additions between the pre-lock scan and now, then re-check id
+    # uniqueness so the append never races into a duplicate, and
+    # re-detect the entry indent so concurrent writes can't cause us to
+    # emit a mixed-indent file.
+    with write_lock(ctx.paths.activities):
+        _, current = load_activities(ctx.paths.activities)
+        if data["id"] in {e.get("id") for e in current}:
+            print(f"ERROR: entry with id '{data['id']}' already exists")
+            return 1
+        ctx.paths.ensure_home()
+        # Re-detect indent inside the lock and re-render the entry if the
+        # detected indent diverged from the pre-lock pass.
+        locked_indent = _detect_entry_indent(ctx.paths)
+        if locked_indent != indent:
+            yaml_text = _render_entry(ctx, data, indent=locked_indent)
+        # Build the final file content atomically: existing-or-fresh
+        # ``activities:`` prefix concatenated with the new entry. Routing
+        # through ``atomic_replace`` closes the round-3 #4 window where a
+        # non-atomic ``Path.write_text("activities:\n")`` first-create
+        # was visible to unlocked readers as a 0-byte file.
+        if ctx.paths.activities.exists():
+            existing_content = ctx.paths.activities.read_text(encoding="utf-8")
+        else:
+            existing_content = "activities:\n"
+        atomic_replace(ctx.paths.activities, existing_content + "\n" + yaml_text)
+        append_ledger(
+            ctx.paths.ledger, "create", data["id"], label, details=f"tags={len(data['tags'])}"
+        )
     print(f"Created entry '{data['id']}'")
     return 0
 
@@ -2489,8 +2633,9 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
     else:
         repoint_skip_ranges = all_source_ranges
 
-    # Pre-count inbound refs per source, excluding source ranges + target's
-    # range so the preview matches what step 1's rewrite will actually do.
+    # Pre-count inbound refs per source for step 1 (cross-file repoint),
+    # excluding source ranges + target's range so this matches what
+    # ``_repoint_references`` will actually do.
     repoint_counts: dict[str, int] = {}
     for sid in source_ids:
         pattern = re.compile(rf"(?<![a-z0-9-]){re.escape(sid)}(?![a-z0-9-])")
@@ -2500,6 +2645,55 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
                 continue
             n += len(pattern.findall(line))
         repoint_counts[sid] = n
+
+    # Also account for the rewrites that happen INSIDE the merge's own
+    # steps so the preview total matches the ledger total. PR #16's review
+    # lesson: preview must equal what the commit actually records. Steps
+    # counted here:
+    #   1b. Backticked source-id mentions inside the target's range that
+    #       get rewritten to `target_id` after step 1 skipped that range.
+    #   2.  ``_rewrite_ids`` traversal over every carried block's string
+    #       values, rewriting plain-text source-id mentions inside the
+    #       block data to ``target_id``.
+    #   5.  When ``--append-sources`` is on, every backticked source-id
+    #       mention (including self) in each source's description gets
+    #       rewritten to ``target_id`` before splicing.
+    preview_extra = 0
+    if t_pre_start is not None:
+        for sid in source_ids:
+            bt_pat = re.compile(rf"`{re.escape(sid)}`")
+            for i in range(t_pre_start, t_pre_end):
+                preview_extra += len(bt_pat.findall(lines[i]))
+
+    def _count_ids_in_value(value) -> int:
+        """Recursively count plain-text source-id mentions in a block value
+        (the same word-boundary pattern ``_rewrite_ids`` uses at exec
+        time)."""
+        if isinstance(value, str):
+            total = 0
+            for sid in source_ids:
+                wp = re.compile(rf"(?<![a-z0-9-]){re.escape(sid)}(?![a-z0-9-])")
+                total += len(wp.findall(value))
+            return total
+        if isinstance(value, dict):
+            return sum(_count_ids_in_value(v) for v in value.values())
+        if isinstance(value, list):
+            return sum(_count_ids_in_value(v) for v in value)
+        return 0
+
+    for _bn, (_sid, block_data) in blocks_to_carry.items():
+        preview_extra += _count_ids_in_value(block_data)
+
+    if append_sources:
+        for s in sources:
+            body = (s.get("description") or "").strip()
+            if not body:
+                continue
+            for sid in source_ids:
+                bt_pat = re.compile(rf"`{re.escape(sid)}`")
+                preview_extra += len(bt_pat.findall(body))
+
+    preview_total = sum(repoint_counts.values()) + preview_extra
 
     # Print the plan.
     print(f"Merge plan: {len(source_ids)} source(s) -> '{target_id}'")
@@ -2526,11 +2720,20 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
             "  Duplicate-source blocks dropped (first source wins): "
             + ", ".join(f"{bn} from {sid}" for bn, sid in dropped_first_wins)
         )
-    print("  Inbound references to repoint:")
+    print("  Inbound references to repoint (step 1, cross-file):")
     for sid in source_ids:
         print(f"    {sid}: {repoint_counts[sid]}")
+    if preview_extra:
+        print(f"  Additional internal rewrites (steps 1b/2/5): {preview_extra}")
+    print(f"  Total references to repoint (matches ledger): {preview_total}")
 
-    print("\nSource descriptions (fold what you want into the target via update-description):")
+    # Source-description preview. When --append-sources is on the merge will
+    # fold these in automatically; otherwise the user picks what to carry by
+    # hand via update-description.
+    if append_sources:
+        print("\nSource descriptions (will be appended automatically by --append-sources):")
+    else:
+        print("\nSource descriptions (fold what you want into the target via update-description):")
     print("---")
     for s in sources:
         sid = s.get("id")
@@ -2538,6 +2741,68 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
         print((s.get("description") or "").strip())
         print()
     print("---")
+
+    # Pre-execute shape gates that affect the body splice (step 5). Hoisting
+    # these BEFORE the dry-run return so the preview accurately reflects
+    # whether --confirm would commit — without this, a `description: >`
+    # target would print a clean preview and only error on --confirm,
+    # defeating the trust-the-preview pattern.
+    if with_provenance or append_sources:
+        active = []
+        if with_provenance:
+            active.append("provenance note")
+        if append_sources:
+            active.append("--append-sources content")
+        active_label_preview = " + ".join(active)
+        opt_outs_preview = []
+        if with_provenance:
+            opt_outs_preview.append("--no-provenance")
+        if append_sources:
+            opt_outs_preview.append("drop --append-sources")
+        opt_out_preview = (
+            " and ".join(opt_outs_preview) if len(opt_outs_preview) > 1 else opt_outs_preview[0]
+        )
+        t_start_pv, t_end_pv = find_entry_line_range(lines, target_id)
+        if t_start_pv is None:
+            # Target parses via load_activities but its ``- id:`` line
+            # can't be found by the string scanner (unusual quoting form
+            # or hand-edit). Match the per-source error shape; without
+            # this guard ``_find_entry_field_line`` raises ``TypeError``
+            # on ``lines[None]`` and the user gets a raw traceback
+            # (round-5 #3).
+            print(f"ERROR: cannot locate target '{target_id}' in activities; aborting")
+            return 1
+        desc_idx_pv = _find_entry_field_line(lines, t_start_pv, t_end_pv, "description")
+        if desc_idx_pv is None:
+            print(
+                f"ERROR: target '{target_id}' has no description field; cannot "
+                f"add {active_label_preview} (re-run with {opt_out_preview} to skip)"
+            )
+            return 1
+        desc_content_pv = lines[desc_idx_pv].split("description:", 1)[1].strip()
+        if not desc_content_pv:
+            print(
+                f"ERROR: target '{target_id}' has an empty description field; "
+                f"cannot add {active_label_preview} (re-run with "
+                f"{opt_out_preview} to skip)"
+            )
+            return 1
+        if not (desc_content_pv.startswith("|") or desc_content_pv.startswith(">")):
+            print(
+                f"ERROR: target '{target_id}' has an inline description scalar; "
+                f"convert it to a `description: |` literal block (or re-run "
+                f"with {opt_out_preview}) before merging"
+            )
+            return 1
+        if append_sources and desc_content_pv.startswith(">"):
+            print(
+                f"ERROR: target '{target_id}' uses a folded-scalar description "
+                f"(`description: >`); --append-sources requires a literal-block "
+                f"scalar (`description: |`) because YAML folds newlines into "
+                f"spaces and would mangle the appended source bodies. "
+                f"Convert the target to `|` first, or drop --append-sources."
+            )
+            return 1
 
     if not parsed.confirm:
         print("\nDry run — pass --confirm to actually merge.")
@@ -2618,14 +2883,12 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
             return new, count
         return value, 0
 
-    # Iterate a snapshot of the items so the per-iteration value rewrite isn't
-    # mutating a live view of the dict we're walking (the value-only mutation
-    # is safe on CPython today, but the snapshot keeps the pattern explicit).
-    for bn, (_sid, block_data) in list(blocks_to_carry.items()):
-        rewritten_block, n = _rewrite_ids(block_data)
+    for bn, (_sid, block_data) in blocks_to_carry.items():
+        # _rewrite_ids returns a fresh tree; no mutation of the dict during
+        # iteration. `block_data` is the only downstream reader so we don't
+        # need to write the rewritten value back into blocks_to_carry.
+        block_data, n = _rewrite_ids(block_data)
         actual_repoint_total += n
-        blocks_to_carry[bn] = (_sid, rewritten_block)
-        block_data = rewritten_block
         t_start, t_end = find_entry_line_range(lines, target_id)
         existing_idx = _find_entry_field_line(lines, t_start, t_end, bn)
         if existing_idx is not None:
@@ -2756,7 +3019,11 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
             opt_outs.append("--no-provenance")
         if append_sources:
             opt_outs.append("drop --append-sources")
-        opt_out_advice = " or ".join(opt_outs)
+        # Join with `and` (not `or`) when BOTH opt-outs are needed: dropping
+        # either alone still leaves the other active, which keeps the same
+        # shape check failing. The user has to drop every active body-write
+        # to skip it.
+        opt_out_advice = " and ".join(opt_outs) if len(opt_outs) > 1 else opt_outs[0]
 
         t_start, t_end = find_entry_line_range(lines, target_id)
         desc_idx = _find_entry_field_line(lines, t_start, t_end, "description")
@@ -2778,6 +3045,21 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
                 f"ERROR: target '{target_id}' has an inline description scalar; "
                 f"convert it to a `description: |` literal block (or re-run with "
                 f"{opt_out_advice}) before merging"
+            )
+            return 1
+        # Folded-scalar (`>`) gates `--append-sources` specifically. YAML's
+        # folded form collapses single newlines into spaces, so every appended
+        # `## From <sid>` header, body line, and blank separator would fuse
+        # into one paragraph. The provenance one-liner alone is bounded (it's
+        # one line, folded becomes a space) so `>` + only-provenance is OK;
+        # `>` + append-sources is not.
+        if append_sources and desc_content.startswith(">"):
+            print(
+                f"ERROR: target '{target_id}' uses a folded-scalar description "
+                f"(`description: >`); --append-sources requires a literal-block "
+                f"scalar (`description: |`) because YAML folds newlines into "
+                f"spaces and would mangle the appended source bodies. "
+                f"Convert the target to `|` first, or drop --append-sources."
             )
             return 1
         desc_indent = line_indent(lines[desc_idx])
@@ -2816,7 +3098,10 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
                 sid = s.get("id")
                 body = (s.get("description") or "").strip()
                 if not body:
-                    new_body_lines.append(f"{' ' * body_indent}## From {sid}\n")
+                    # Empty source body: emit a marker so a reader doesn't see
+                    # a bare `## From <sid>` header followed by a blank line
+                    # and wonder whether content went missing.
+                    new_body_lines.append(f"{' ' * body_indent}## From {sid} (no description)\n")
                     new_body_lines.append(f"{' ' * body_indent}\n")
                     continue
                 # Rewrite ALL backticked source-id mentions in the body to
@@ -3127,37 +3412,213 @@ def cmd_file_update(ctx: Context, args: list[str]) -> int:
     return 0
 
 
-@_files_locked
 def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
-    """Recompute sha256 for one file or the whole inventory. ``file-rehash <id>|--all``"""
+    """Recompute sha256 for one file or the whole inventory. ``file-rehash <id>|--all``
+
+    NOTE: this command intentionally does NOT use ``@_files_locked``. SHA-256
+    on a large registered file (videos, archives, datasets) can take seconds
+    to minutes, and holding the cross-process flock through the whole loop
+    would serialize every concurrent ``file-*`` writer behind it. Instead the
+    expensive hashing runs OUTSIDE the lock, and the lock is taken only for
+    the short load/apply-deltas/save phase. If a concurrent writer adds or
+    moves a record while hashing is in progress, this run prints a notice
+    so the user knows to rerun rather than silently skipping.
+    """
+    # Help / usage short-circuit. Without the decorator wrapper, the
+    # ``_is_pure_read_invocation`` skip never runs for this command, so a
+    # ``file-rehash --help`` invocation would otherwise fall through to
+    # the id-lookup path and report "file id '--help' not found". Scan
+    # the whole argv so ``file-rehash <id> --help`` is also caught (not
+    # just the help-first case).
+    if any(a in ("-h", "--help") for a in args):
+        print("Usage: librarian file-rehash <id> | --all")
+        print("  Recompute sha256 for one registered file or the whole inventory.")
+        return 0
     label = _resolve_label(args, required=True)
     if label is None:
         return 1
     if not args:
         print("Usage: librarian file-rehash <id> | --all")
         return 1
-    records = load_files(ctx.paths.files)
+
+    # Phase 1 — snapshot inventory and resolve targets (no lock; pure read).
+    snapshot = load_files(ctx.paths.files)
     if args[0] == "--all":
-        targets, scope = records, "--all"
+        targets, scope = snapshot, "--all"
     else:
         scope = args[0]
-        targets = [r for r in records if r.get("id") == scope]
+        targets = [r for r in snapshot if r.get("id") == scope]
         if not targets:
             print(f"ERROR: file id '{scope}' not found")
             return 1
-    rehashed, missing = 0, []
+
+    # Phase 2 — compute hashes OUTSIDE the lock. This is the expensive part.
+    # We store (path_snapshot, sha) per id so phase 3 can verify the record's
+    # path didn't change underneath us via a concurrent ``file-move`` — if
+    # it did, we'd be writing a digest for path P_old onto a record whose
+    # path is now P_new, silently corrupting the inventory.
+    hash_results: dict[str, tuple[str, str]] = {}  # id -> (rel_path, sha256)
+    missing: list[str] = []
+    malformed: list[str] = []  # empty/None path on a real id
     for record in targets:
-        abs_path = ctx.paths.root / record.get("path", "")
-        if not abs_path.exists():
-            missing.append(record.get("id"))
+        rid = record.get("id")
+        # ``not rid`` covers None, "", and whitespace-only ids. The empty
+        # string is the round-4 #1 trap: two records with ``id: ""`` would
+        # collide under ``hash_results[""]`` with last-write-wins, then
+        # phase 3 would write the wrong digest onto whichever record's path
+        # coincidentally matched — silent inventory corruption.
+        if not rid or not str(rid).strip():
             continue
-        record["sha256"] = sha256_of(abs_path)
-        rehashed += 1
-    save_files(ctx.paths.files, records)
-    append_ledger(ctx.paths.ledger, "file-rehash", scope, label, f"rehashed={rehashed}")
+        rel_path = record.get("path", "")
+        # Explicit empty-path / non-string guard before the ``.exists()``
+        # call: ``ctx.paths.root / ""`` resolves to the data home itself
+        # (a directory whose ``.exists()`` returns True), and
+        # ``sha256_of`` then opens a directory → ``IsADirectoryError``.
+        # ``path: ~`` (YAML null) becomes ``None`` and ``Path / None``
+        # raises ``TypeError`` that the except below wouldn't catch.
+        if not rel_path or not isinstance(rel_path, str):
+            malformed.append(rid)
+            continue
+        abs_path = ctx.paths.root / rel_path
+        if not abs_path.exists():
+            missing.append(rid)
+            continue
+        try:
+            sha = sha256_of(abs_path)
+        except (FileNotFoundError, OSError) as exc:
+            # TOCTOU: the file existed at the ``.exists()`` check above but
+            # was removed (or made unreadable) before/during the streaming
+            # hash. Pre-PR the wide files-lock made the window milliseconds;
+            # the lock-scope shrink widens it to potentially minutes for a
+            # large file, so this race is now reachable. Treat as missing
+            # rather than letting the exception bubble up and abandon every
+            # hash already computed for the other records.
+            missing.append(rid)
+            print(
+                f"WARNING: {rid}: file vanished or became unreadable during "
+                f"hashing ({exc.__class__.__name__}); skipping."
+            )
+            continue
+        hash_results[rid] = (rel_path, sha)
+
+    # Phase 3 — apply deltas under the lock. Re-load to absorb any concurrent
+    # writes that landed during phase 2, then patch in our hashes by id ONLY
+    # when the record's path still matches what phase 2 hashed.
+    skipped_path_drift: list[str] = []
+    added_during_hash: list[str] = []  # records present in phase 3 but not phase 2
+    # ``missing`` and ``malformed`` both capture rids that phase 2 knew
+    # about but couldn't hash. Phase 3 must NOT also flag those rids as
+    # "added during hashing" — that bucket is for genuinely-new records
+    # only. Pre-fix the malformed-path rids leaked into added_during_hash
+    # because missing_set didn't include them (round-5 #2 HIGH).
+    phase2_known = set(missing) | set(malformed)
+    with write_lock(ctx.paths.files):
+        records = load_files(ctx.paths.files)
+        rehashed = 0
+        post_lock_ids = set()
+        for record in records:
+            rid = record.get("id")
+            # Mirror phase 2's predicate exactly (round-5 #1 HIGH). Empty
+            # / whitespace ids spuriously landed in added_during_hash
+            # because phase 3 only None-guarded — every --all run then
+            # showed a bogus "added during hashing: " (blank id) notice
+            # and the ledger recorded ``added-during=1`` on every run.
+            if not rid or not str(rid).strip():
+                continue
+            post_lock_ids.add(rid)
+            snapshot = hash_results.get(rid)
+            if snapshot is None:
+                # Record present at phase 3 but no entry in hash_results.
+                # Genuinely-new (concurrent file-add) is what we want to
+                # surface to --all. Exclude rids that phase 2 already routed
+                # into ``missing`` (path didn't exist on disk) so the user
+                # doesn't see both "Skipped missing" AND "added during
+                # hashing" for the same id — they're the same record.
+                if scope == "--all" and rid not in phase2_known:
+                    added_during_hash.append(rid)
+                continue
+            snap_path, new_sha = snapshot
+            if record.get("path", "") != snap_path:
+                # Concurrent ``file-move`` rewrote this id's path between
+                # phases. Skip rather than overwrite the wrong digest.
+                skipped_path_drift.append(rid)
+                continue
+            record["sha256"] = new_sha
+            rehashed += 1
+        # Detect single-id-rehash where the record vanished between phases
+        # (e.g. concurrent ``file-delete``). Phase-2 found it; phase-3
+        # didn't — rehashed stays 0 and we owe the user a clear notice.
+        # NOTE: ``scope not in skipped_path_drift`` is implied by
+        # ``scope not in post_lock_ids`` (a rid only lands in
+        # skipped_path_drift after being added to post_lock_ids), so it's
+        # omitted. Round-4 #13 flagged the redundant clause as hiding a
+        # future-refactor footgun; cleaner predicate without it.
+        scope_id_vanished = (
+            scope != "--all" and scope in hash_results and scope not in post_lock_ids
+        )
+        # Skip the inventory rewrite + ledger entry when nothing actually
+        # changed: no new digests written, no path-drift skips, no
+        # vanished id, no concurrent additions. Avoids an unnecessary
+        # mtime bump (wakes sync/watcher tooling) and avoids a misleading
+        # ``rehashed=0`` ledger row indistinguishable from a healthy
+        # no-op.
+        wrote_anything = (
+            rehashed > 0 or skipped_path_drift or added_during_hash or scope_id_vanished
+        )
+        if rehashed > 0:
+            save_files(ctx.paths.files, records)
+        if wrote_anything:
+            detail = f"rehashed={rehashed}"
+            if scope_id_vanished:
+                detail += " vanished=1"
+            if skipped_path_drift:
+                detail += f" path-drift={len(skipped_path_drift)}"
+            if added_during_hash:
+                detail += f" added-during={len(added_during_hash)}"
+            append_ledger(ctx.paths.ledger, "file-rehash", scope, label, detail)
+
+    # Round-4 #8: --all also surfaces records removed between phases so
+    # the user knows their hashes were silently dropped (the symmetric
+    # case to ``added_during_hash``).
+    removed_during_hash: list[str] = []
+    if scope == "--all":
+        for rid in hash_results:
+            if rid not in post_lock_ids:
+                removed_during_hash.append(rid)
+
     print(f"Rehashed {rehashed} file(s).")
     if missing:
-        print(f"Skipped {len(missing)} missing from disk: {', '.join(missing)}")
+        print(f"Skipped {len(missing)} missing from disk: {', '.join(str(m) for m in missing)}")
+    if malformed:
+        print(
+            f"Skipped {len(malformed)} with empty / non-string path "
+            f"(hand-edit the inventory to fix): "
+            f"{', '.join(str(m) for m in malformed)}"
+        )
+    if skipped_path_drift:
+        print(
+            f"Skipped {len(skipped_path_drift)} whose path changed during "
+            f"hashing (rerun to pick them up): "
+            f"{', '.join(str(m) for m in skipped_path_drift)}"
+        )
+    if scope_id_vanished:
+        print(
+            f"WARNING: '{scope}' was removed from the inventory while hashing "
+            f"was in progress (concurrent file-delete). Nothing was written."
+        )
+    if added_during_hash:
+        print(
+            f"Note: {len(added_during_hash)} record(s) were added during "
+            f"hashing and were not included in this --all rehash "
+            f"(rerun to pick them up): "
+            f"{', '.join(str(m) for m in added_during_hash)}"
+        )
+    if removed_during_hash:
+        print(
+            f"Note: {len(removed_during_hash)} record(s) were removed during "
+            f"hashing; their phase-2 digests were discarded: "
+            f"{', '.join(str(m) for m in removed_during_hash)}"
+        )
     return 0
 
 
