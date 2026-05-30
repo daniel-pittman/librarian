@@ -323,6 +323,80 @@ def test_scan_dangling_refs_historical_phrase_survives_line_wrap():
     )
 
 
+def test_scan_dangling_refs_sentence_break_skips_decimals_and_abbreviations():
+    """Decimals (``4.2``), version numbers (``v1.0``), and short abbreviations
+    (``e.g.``, ``Dr.``) must NOT count as sentence boundaries — the lookbehind
+    of 3+ alphabetic characters rules them out. Otherwise a historical phrase
+    preceding such a token gets discarded and the backtick after it is wrongly
+    flagged as dangling.
+
+    Round-7 review finding #1 (regression from round 6's sentence-break
+    tightening).
+    """
+    activities = [
+        _entry(
+            "2026-09-spec",
+            description="Originally tracked under section 4.2 of `2024-old-spec`.",
+        ),
+        _entry(
+            "2026-09-version",
+            description="Originally tracked under v1.0 of the `2024-foo-bar` schema.",
+        ),
+        _entry(
+            "2026-09-eg",
+            description="Originally tracked e.g. under the legacy `2024-baz` index.",
+        ),
+    ]
+    ids = {"2026-09-spec", "2026-09-version", "2026-09-eg"}
+    findings = scan_dangling_refs(activities, ids=ids, text_fields=_DESC)
+    refs = {ref for _, ref, _ in findings}
+    assert "2024-old-spec" not in refs, (
+        f"decimal '4.2' must not act as a sentence boundary: {findings}"
+    )
+    assert "2024-foo-bar" not in refs, (
+        f"version 'v1.0' must not act as a sentence boundary: {findings}"
+    )
+    assert "2024-baz" not in refs, (
+        f"abbreviation 'e.g.' must not act as a sentence boundary: {findings}"
+    )
+
+
+def test_scan_dangling_refs_does_not_suppress_on_bare_named():
+    """The bare ``named`` alternative (``originally named``, ``previously
+    named``, ``formerly named`` without an ``as`` completer) must NOT
+    suppress unrelated dangling refs. Round-7 review finding #2: the
+    ``named`` form was overlooked when round-5 tightened the other
+    completers.
+    """
+    activities = [
+        _entry(
+            "2026-09-haste",
+            description=(
+                "The helper was originally named in haste during the spike. "
+                "See `2024-broken-ref` for the rewrite."
+            ),
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-haste"}, text_fields=_DESC)
+    refs = {ref for _, ref, _ in findings}
+    assert "2024-broken-ref" in refs, (
+        f"bare 'originally named' (no 'as') must not hide a dangling ref: {findings}"
+    )
+
+
+def test_scan_dangling_refs_still_skips_named_as_with_completer():
+    """The tightened ``named as`` form must still be recognized as
+    historical context."""
+    activities = [
+        _entry(
+            "2026-09-renamed-as",
+            description="Originally named as `2024-old-name` in the proposal.",
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-renamed-as"}, text_fields=_DESC)
+    assert findings == [], f"explicit 'named as' form was wrongly flagged: {findings}"
+
+
 def test_scan_dangling_refs_paragraph_break_still_scopes_phrase():
     """Round-5's sentence-scope intent (a phrase in a PRIOR sentence does
     not apply to a backtick in the next) still holds for the paragraph-

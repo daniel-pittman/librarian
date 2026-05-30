@@ -205,9 +205,9 @@ _HISTORICAL_PHRASES_RE = re.compile(
     # Each historical word must be followed by a context verb to count, so a
     # bare "previously discussed" or "formerly common practice" cannot
     # blanket-suppress an unrelated dangling ref in the same window.
-    r"originally\s+(?:tracked|known\s+as|named|filed\s+under|recorded\s+as|stored\s+as|logged\s+as)|"
-    r"previously\s+(?:tracked|known\s+as|named|filed\s+under|recorded\s+as)|"
-    r"formerly\s+(?:tracked|known\s+as|named|filed\s+under)|"
+    r"originally\s+(?:tracked|known\s+as|named\s+as|filed\s+under|recorded\s+as|stored\s+as|logged\s+as)|"
+    r"previously\s+(?:tracked|known\s+as|named\s+as|filed\s+under|recorded\s+as)|"
+    r"formerly\s+(?:tracked|known\s+as|named\s+as|filed\s+under)|"
     r"consolidat\w*\s+(?:from|under|into)|"
     r"merged\s+(?:from|into)|"
     r"renamed\s+(?:from|to)|"
@@ -223,16 +223,23 @@ _HISTORICAL_PHRASES_RE = re.compile(
 _HISTORICAL_WINDOW = 200  # chars before the backtick we'll scan for a phrase
 
 # Matches the LAST sentence/clause boundary in a window of preceding text.
-# A boundary is either a sentence terminator (. ! ?) followed by whitespace,
-# or a paragraph break (blank line). A bare ``\n`` is NOT a boundary: YAML
-# literal-block descriptions routinely wrap prose mid-clause across lines, so
-# a description authored as ``Originally tracked\nunder `id`.`` must still
-# be recognized as a historical phrase. The ``(?s).*`` prefix is greedy +
-# DOTALL so ``re.search`` returns the LAST boundary (the regex backtracks
-# until the trailing alternation matches, leaving ``match.end()`` past the
-# final boundary). Used by ``scan_dangling_refs`` to trim the historical-
-# phrase look-back to the current sentence.
-_LAST_SENTENCE_BREAK_RE = re.compile(r"(?s).*([.!?]\s+|\n\s*\n)")
+# A boundary is either:
+#
+#   * a sentence terminator (. ! ?) with three-or-more alphabetic characters
+#     immediately before it AND an uppercase letter starting the next word,
+#     OR
+#   * a paragraph break (blank line).
+#
+# The three-alpha lookbehind plus uppercase lookahead is a heuristic: it
+# matches real sentence ends ("X was stored as CSV. See") but skips the
+# common false-positive abbreviations and number patterns ("4.2", "Mr.",
+# "Dr.", "e.g.", "v1.0"). It still false-positives on full-word abbreviations
+# like "etc." or "Mrs." followed by a proper noun, but those collisions are
+# rare in librarian description prose. A bare ``\n`` is deliberately NOT a
+# boundary: YAML literal-block descriptions routinely wrap prose mid-clause.
+# The ``(?s).*`` prefix is greedy + DOTALL so ``re.search`` returns the LAST
+# boundary.
+_LAST_SENTENCE_BREAK_RE = re.compile(r"(?s).*((?<=[A-Za-z]{3})[.!?]\s+(?=[A-Z])|\n\s*\n)")
 
 
 def scan_dangling_refs(
