@@ -208,14 +208,22 @@ _HISTORICAL_PHRASES_RE = re.compile(
     r"originally\s+(?:tracked|known\s+as|named\s+as|filed\s+under|recorded\s+as|stored\s+as|logged\s+as)|"
     r"previously\s+(?:tracked|known\s+as|named\s+as|filed\s+under|recorded\s+as)|"
     r"formerly\s+(?:tracked|known\s+as|named\s+as|filed\s+under)|"
-    # Finite verb forms only (drop the open ``\w*`` quantifier and the
-    # "into" / non-historical alternatives). "consolidation into a single
-    # index" or "merged into main last week" should NOT count as historical
-    # provenance — those are generic dev/operations prose. The merge-history
-    # use cases the scanner cares about are "Consolidat(e|es|ed|ing) from
-    # `<id>`" and "Merged from `<id>`".
+    # Finite verb forms only (drop the open ``\w*`` quantifier). For the
+    # ``from`` direction, accept the phrase anywhere — that prepositional
+    # phrase always introduces a former identity. For ``into`` / ``under``,
+    # require the phrase to sit IMMEDIATELY before the backticked id (the
+    # ``(?=\s*$)`` lookahead anchors to end-of-look-back-window; the scanner
+    # passes only the text BEFORE the backtick to ``_HISTORICAL_PHRASES_RE
+    # .search``, so ``$`` is the position just before the backtick).
+    # Generic dev/operations prose like "merged into main last week" or
+    # "consolidation into a single index" doesn't blanket-suppress
+    # unrelated dangling refs (the phrase has prose after it before
+    # reaching the backtick), while "Consolidated into `<old-id>`" /
+    # "Merged into `<old-id>`" historical phrasings ARE recognized.
     r"consolidat(?:e|es|ed|ing)\s+from|"
+    r"consolidat(?:e|es|ed|ing)\s+(?:into|under)(?=\s*$)|"
     r"merged\s+from|"
+    r"merged\s+into(?=\s*$)|"
     r"renamed\s+(?:from|to)|"
     r"superseded\s+by"
     # The bare alternatives "old id", "former(ly) id" and "was named/known as"

@@ -3471,6 +3471,63 @@ def test_file_rehash_skips_when_path_changed_between_phases(sandbox, tmp_path):
     assert "rehash-b" in out, f"expected rehash-b to appear in path-drift skip notice: {out}"
 
 
+def test_file_rehash_help_short_circuits(sandbox):
+    """``librarian file-rehash --help`` must print usage and exit 0 —
+    not fall through to the id-lookup path and report ``file id
+    '--help' not found``.
+
+    v1.7.1 follow-up — round-2 PR #20 #3.
+    """
+    out, _, rc = sandbox.run("file-rehash", "--help")
+    assert rc == 0, f"file-rehash --help should exit 0: {out}"
+    assert "Usage" in out or "usage" in out
+    out, _, rc = sandbox.run("file-rehash", "-h")
+    assert rc == 0
+    assert "Usage" in out or "usage" in out
+
+
+def test_write_preserves_file_mode(sandbox):
+    """A user that ``chmod 600``s activities.yaml must see the mode
+    survive across writes — the temp+rename pattern can otherwise revert
+    the mode to umask defaults.
+
+    v1.7.1 follow-up — round-2 PR #20 #4.
+    """
+    import os as _os
+    import stat as _stat
+
+    _os.chmod(sandbox.activities, 0o600)
+    mode_before = _stat.S_IMODE(sandbox.activities.stat().st_mode)
+    assert mode_before == 0o600, f"chmod did not take effect: {oct(mode_before)}"
+
+    # Trigger a full rewrite via add-tags (uses write_lines under the hood).
+    sandbox.run("add-tags", "2024-03-intro-security-course", "mode-probe")
+    mode_after = _stat.S_IMODE(sandbox.activities.stat().st_mode)
+    assert mode_after == 0o600, f"write reverted mode: {oct(mode_before)} -> {oct(mode_after)}"
+
+
+def test_append_text_round_trips_parseable_yaml(sandbox):
+    """A full ``cmd_create`` (which appends via append_text) must leave
+    the activities file fully parseable after the write completes —
+    atomic-replace semantics.
+
+    v1.7.1 follow-up — round-2 PR #20 #1.
+    """
+    entry = {
+        "id": "2026-09-atomic-append",
+        "date": "2026-09-01",
+        "title": "Atomic append probe",
+        "description": "Probe.",
+        "tags": ["probe"],
+    }
+    out, err, rc = sandbox.run("create", stdin=json.dumps(entry))
+    assert rc == 0, f"create failed: {err}"
+    import yaml as _yaml
+
+    parsed = _yaml.safe_load(sandbox.activities.read_text())
+    assert any(e["id"] == "2026-09-atomic-append" for e in parsed["activities"])
+
+
 def test_create_dry_run_without_label_succeeds(sandbox):
     """``librarian create --dry-run`` without a ``--label`` (and without
     the env var) must succeed: dry-run doesn't write, so the label gate

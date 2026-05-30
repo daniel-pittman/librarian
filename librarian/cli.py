@@ -1302,7 +1302,12 @@ def cmd_create(ctx: Context, args: list[str]) -> int:
         print(f"ERROR: entry with id '{data['id']}' already exists")
         return 1
 
-    # Fuzzy duplicate warning (non-blocking; informational only).
+    # Fuzzy duplicate warning (non-blocking; informational only). Note this
+    # scan operates on the PRE-LOCK snapshot, so a near-duplicate landed by
+    # a concurrent writer between the snapshot and the locked append won't
+    # appear in the warning. That's an acceptable trade for not holding the
+    # lock through the O(N) similarity scan — the warning is advisory and
+    # a hard id-collision is still caught by the post-lock re-check.
     query_text = f"{data.get('title', '')} {data.get('description', '')}"
     similar = sorted(
         ((best_similarity(query_text, e), e) for e in activities),
@@ -3284,10 +3289,17 @@ def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
     would serialize every concurrent ``file-*`` writer behind it. Instead the
     expensive hashing runs OUTSIDE the lock, and the lock is taken only for
     the short load/apply-deltas/save phase. If a concurrent writer adds or
-    moves a record while hashing is in progress, this run silently skips
-    that change (its id won't be in our ``hash_results`` dict); the user can
-    rerun to pick it up.
+    moves a record while hashing is in progress, this run prints a notice
+    so the user knows to rerun rather than silently skipping.
     """
+    # Help / usage short-circuit. Without the decorator wrapper, the
+    # ``_is_pure_read_invocation`` skip never runs for this command, so a
+    # ``file-rehash --help`` invocation would otherwise fall through to
+    # the id-lookup path and report "file id '--help' not found".
+    if args and args[0] in ("-h", "--help"):
+        print("Usage: librarian file-rehash <id> | --all")
+        print("  Recompute sha256 for one registered file or the whole inventory.")
+        return 0
     label = _resolve_label(args, required=True)
     if label is None:
         return 1
@@ -3332,15 +3344,23 @@ def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
     # writes that landed during phase 2, then patch in our hashes by id ONLY
     # when the record's path still matches what phase 2 hashed.
     skipped_path_drift: list[str] = []
+    added_during_hash: list[str] = []  # records present in phase 3 but not phase 2
     with write_lock(ctx.paths.files):
         records = load_files(ctx.paths.files)
         rehashed = 0
+        post_lock_ids = set()
         for record in records:
             rid = record.get("id")
             if rid is None:
                 continue
+            post_lock_ids.add(rid)
             snapshot = hash_results.get(rid)
             if snapshot is None:
+                # Record present at phase 3 but not phase 2: a concurrent
+                # ``file-add`` landed between phases. Track on --all so the
+                # user knows the run was incomplete and reruns.
+                if scope == "--all":
+                    added_during_hash.append(rid)
                 continue
             snap_path, new_sha = snapshot
             if record.get("path", "") != snap_path:
@@ -3350,6 +3370,15 @@ def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
                 continue
             record["sha256"] = new_sha
             rehashed += 1
+        # Detect single-id-rehash where the record vanished between phases
+        # (e.g. concurrent ``file-delete``). Phase-2 found it; phase-3
+        # didn't — rehashed stays 0 and we owe the user a clear notice.
+        scope_id_vanished = (
+            scope != "--all"
+            and scope in hash_results
+            and scope not in post_lock_ids
+            and scope not in skipped_path_drift
+        )
         save_files(ctx.paths.files, records)
         append_ledger(ctx.paths.ledger, "file-rehash", scope, label, f"rehashed={rehashed}")
 
@@ -3363,6 +3392,18 @@ def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
             f"Skipped {len(skipped_path_drift)} whose path changed during "
             f"hashing (rerun to pick them up): "
             f"{', '.join(str(m) for m in skipped_path_drift)}"
+        )
+    if scope_id_vanished:
+        print(
+            f"WARNING: '{scope}' was removed from the inventory while hashing "
+            f"was in progress (concurrent file-delete). Nothing was written."
+        )
+    if added_during_hash:
+        print(
+            f"Note: {len(added_during_hash)} record(s) were added during "
+            f"hashing and were not included in this --all rehash "
+            f"(rerun to pick them up): "
+            f"{', '.join(str(m) for m in added_during_hash)}"
         )
     return 0
 

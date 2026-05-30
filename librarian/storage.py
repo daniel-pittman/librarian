@@ -155,32 +155,51 @@ class write_lock:
         return False  # never suppress exceptions
 
 
+def _atomic_replace(yaml_path: Path, new_content: str) -> None:
+    """Atomically replace ``yaml_path`` with ``new_content``.
+
+    Writes a temp sidecar then ``os.replace`` over the target. Preserves
+    the target's existing mode bits when present — ``os.replace`` would
+    otherwise adopt the tmp file's umask-default mode and silently revert
+    a ``chmod 600`` the user (or downstream packaging) applied for
+    access restriction.
+
+    Caller must hold the resource's :class:`write_lock`.
+    """
+    yaml_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        fh.write(new_content)
+    if yaml_path.exists():
+        import shutil
+
+        shutil.copymode(yaml_path, tmp_path)
+    os.replace(tmp_path, yaml_path)
+
+
 def write_lines(yaml_path: Path, lines: list[str]) -> None:
     """Write `lines` to the activities file under an exclusive lock.
 
-    Atomic from a concurrent reader's point of view: we write to a temp
-    sidecar then ``os.replace`` it over the target. Without this, an
-    in-progress ``open(yaml_path, "w")`` briefly truncates the file, and
-    an unlocked reader (e.g. ``cmd_create``'s pre-lock snapshot) can see
-    a partial / empty file → ``yaml.safe_load`` raises or returns nothing.
+    Atomic from a concurrent reader's POV via temp+``os.replace``.
     """
     with write_lock(yaml_path):
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as fh:
-            fh.writelines(lines)
-        os.replace(tmp_path, yaml_path)
+        _atomic_replace(yaml_path, "".join(lines))
 
 
 def append_text(yaml_path: Path, text: str) -> None:
     """Append `text` to the activities file under an exclusive lock.
 
-    Used by ``create`` to add a new entry without rewriting the whole file.
+    Used by ``create`` to add a new entry. Atomic from a concurrent
+    reader's POV: we read the existing content, concat the new text, and
+    write the combined result via temp+``os.replace``. The cost is a full
+    file rewrite per create (proportional to the existing corpus size)
+    in exchange for atomicity — without it, an unlocked reader can land
+    mid-``open("a")``'s flushes and see a truncated final entry whose
+    YAML doesn't parse.
     """
     with write_lock(yaml_path):
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(yaml_path, "a", encoding="utf-8") as fh:
-            fh.write(text)
+        existing = yaml_path.read_text(encoding="utf-8") if yaml_path.exists() else ""
+        _atomic_replace(yaml_path, existing + text)
 
 
 # ---------------------------------------------------------------------------

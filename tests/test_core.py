@@ -469,6 +469,58 @@ def test_scan_dangling_refs_consolidated_from_still_recognized():
     assert findings == [], f"historical finite forms wrongly flagged: {findings}"
 
 
+def test_scan_dangling_refs_into_under_with_backtick_recognized():
+    """Restored after round-2 review #5: legitimate historical forms
+    ``Merged into `<id>``` and ``Consolidated under `<id>``` (where the
+    historical id is preserved in audit prose) are still recognized,
+    while generic dev prose ``merged into main`` / ``consolidation into
+    a single index`` (no immediately-following backtick) is NOT.
+    """
+    historical = [
+        _entry(
+            "2026-09-into-id",
+            description="Merged into `2024-old-x` per the spring cleanup.",
+        ),
+        _entry(
+            "2026-09-under-id",
+            description="Consolidated under `2024-old-y` for audit history.",
+        ),
+        _entry(
+            "2026-09-into-finite",
+            description="Consolidated into `2024-old-z` last quarter.",
+        ),
+    ]
+    h_ids = {"2026-09-into-id", "2026-09-under-id", "2026-09-into-finite"}
+    findings = scan_dangling_refs(historical, ids=h_ids, text_fields=_DESC)
+    assert findings == [], (
+        f"historical 'merged into <id>' / 'consolidated under <id>' wrongly flagged: {findings}"
+    )
+
+    # Generic prose still must NOT suppress unrelated dangling refs.
+    generic = [
+        _entry(
+            "2026-09-merged-into-main",
+            description=(
+                "This branch was merged into main last week. "
+                "Compare with `2024-broken-x` for the alternative."
+            ),
+        ),
+        _entry(
+            "2026-09-index-noun",
+            description=(
+                "Consolidation into a single index improved query speed. "
+                "See `2024-broken-y` for the patch."
+            ),
+        ),
+    ]
+    g_ids = {"2026-09-merged-into-main", "2026-09-index-noun"}
+    findings = scan_dangling_refs(generic, ids=g_ids, text_fields=_DESC)
+    refs = {ref for _, ref, _ in findings}
+    assert "2024-broken-x" in refs and "2024-broken-y" in refs, (
+        f"generic prose wrongly suppressed dangling refs: {findings}"
+    )
+
+
 def test_scan_dangling_refs_multiline_continuation_list_handled():
     """A historical continuation list that wraps across a newline must
     still recognize the ``and`` / ``or`` continuation token, even though

@@ -55,10 +55,8 @@ def save_files(files_path: Path, records: list[dict]) -> None:
     with write_lock(files_path):
         files_path.parent.mkdir(parents=True, exist_ok=True)
         # Atomic from a concurrent reader's POV: write to a sidecar then
-        # ``os.replace`` it over the target. Without this, an in-flight
-        # ``open(files_path, "w")`` briefly truncates the file and an
-        # unlocked ``load_files`` can land on the empty window, raising
-        # YAMLError or returning ``{}``.
+        # ``os.replace`` it over the target. Preserve target mode bits so
+        # a ``chmod 600`` on the inventory survives the round-trip.
         tmp_path = files_path.with_suffix(files_path.suffix + ".tmp")
         with open(tmp_path, "w", encoding="utf-8") as fh:
             yaml.dump(
@@ -69,6 +67,10 @@ def save_files(files_path: Path, records: list[dict]) -> None:
                 sort_keys=False,
                 width=120,
             )
+        if files_path.exists():
+            import shutil
+
+            shutil.copymode(files_path, tmp_path)
         os.replace(tmp_path, files_path)
 
 
