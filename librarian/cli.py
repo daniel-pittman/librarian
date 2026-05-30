@@ -131,20 +131,29 @@ def _is_pure_read_invocation(args: list[str]) -> bool:
 def _print_help_for(func) -> int:
     """Print the help text for a decorated writer command and return 0.
 
-    Used by the decorator when ``-h`` / ``--help`` is the only arg —
-    short-circuits past ``_resolve_label`` so a user running
+    Used by the decorator when ``-h`` / ``--help`` appears anywhere in
+    argv — short-circuits past ``_resolve_label`` so a user running
     ``librarian <writer-cmd> --help`` against a fresh shell (no
     ``LIBRARIAN_SESSION_LABEL`` env var, no ``--label`` flag) sees usage
     rather than ``ERROR: write operations require --label``.
+
+    Renders the docstring as-is. Each writer's docstring includes a
+    usage signature on its first / second line with the full set of
+    accepted flags + enum values, so this is sufficient for ``--help``
+    discovery without restructuring every command to expose its argparse
+    parser. Adds a global-flags footer mentioning ``--label`` and the
+    ``LIBRARIAN_SESSION_LABEL`` env var since those aren't part of any
+    individual command's signature.
     """
     name = func.__name__.removeprefix("cmd_").replace("_", "-")
     print(f"Usage: librarian {name}")
     if func.__doc__:
-        # Render the docstring as-is; module-level commands all keep a
-        # single-paragraph signature on the first line that suffices for
-        # ``--help`` discovery.
         print()
         print(func.__doc__.strip())
+    print()
+    print("Global options (all writer commands):")
+    print("  --label <context>:<purpose>   Session label written to the change ledger.")
+    print("                                Alternative: set LIBRARIAN_SESSION_LABEL env var.")
     return 0
 
 
@@ -213,6 +222,18 @@ def _resolve_label(args: list[str], *, required: bool = True) -> str | None:
         args.pop(i)
         if not candidate:
             print("ERROR: --label= requires a value after the '='")
+            sys.exit(1)
+        # Apply the same flag-shape guard as the space-form. Without this,
+        # ``--label=--dry-run`` silently records ``label="--dry-run"`` in
+        # the ledger while the real ``--dry-run`` is consumed as the
+        # equals value and never reaches argparse, defeating dry-run
+        # intent. v1.7.2: closes the round-6 #2 equals-form bypass.
+        if candidate.startswith("-"):
+            print(
+                f"ERROR: --label requires a value (got '{candidate}', "
+                f"which looks like another flag). Format: "
+                f"<context>:<short-purpose>, e.g. 'cli:main-curator'"
+            )
             sys.exit(1)
         if label is None:
             label = candidate
@@ -1275,11 +1296,16 @@ def _scan_list_items(
 
 
 def cmd_create(ctx: Context, args: list[str]) -> int:
-    """Create a new entry from JSON on stdin or ``--json``. ``create [--json ...]``
+    """Create a new entry from JSON on stdin or ``--json``.
+
+    ``create [--json '<json>'] [--dry-run]``
 
     Required fields: ``id``, ``date``, ``title``, ``description``, ``tags``.
     Optional: ``end_date``, ``docs`` and any schema block. Schema blocks present
     in the input are validated before the entry is written.
+
+    ``--dry-run`` renders the entry and prints what would be written without
+    committing (label is not required in this mode).
 
     NOTE: does NOT use ``@_activities_locked``. The expensive operations —
     JSON-stdin read and the O(N) fuzzy-similarity scan over every entry —
@@ -1414,7 +1440,45 @@ def cmd_create(ctx: Context, args: list[str]) -> int:
         if ctx.paths.activities.exists():
             existing_content = ctx.paths.activities.read_text(encoding="utf-8")
         else:
-            existing_content = "activities:\n"
+            existing_content = ""
+        # Bootstrap an ``activities:`` header when the on-disk content
+        # has no real top-level ``activities:`` mapping key. Empty /
+        # whitespace-only file → safe to bootstrap (no user bytes to
+        # preserve). File with real content but no key (e.g. only a
+        # ``meta:`` block) → REFUSE rather than guess: silently
+        # appending an indented list under no parent key would produce
+        # malformed YAML, and silently rewriting to a bare header would
+        # destroy the user's content. The line-anchored check avoids
+        # false-positives on ``# activities:`` comments and on
+        # description text containing the literal string. v1.7.2 round-1
+        # review: closes the round-6 #4 deferred HIGH and the data-loss
+        # / false-positive shapes my first attempt introduced (review
+        # #1 HIGH + #2 MED).
+        # Inspect non-blank, non-comment lines. ``has_real_content``
+        # decides between "safe to bootstrap" (empty / only comments) and
+        # "refuse rather than silently corrupt" (real top-level content).
+        non_comment_lines = [
+            ln
+            for ln in existing_content.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")
+        ]
+        has_real_content = bool(non_comment_lines)
+        has_root_key = any(ln.lstrip().startswith("activities:") for ln in non_comment_lines)
+        if not has_real_content:
+            # Empty / whitespace / comments-only — safe to bootstrap.
+            # Preserve any comment lines the user wrote.
+            existing_content = (
+                existing_content + "activities:\n" if existing_content.strip() else "activities:\n"
+            )
+        elif not has_root_key:
+            print(
+                f"ERROR: existing '{ctx.paths.activities}' has content but no "
+                f"top-level 'activities:' mapping key; refusing to write to "
+                f"avoid silently corrupting the file. Add 'activities:' as "
+                f"the top-level key (your other content is preserved) or "
+                f"move the file aside and retry."
+            )
+            return 1
         atomic_replace(ctx.paths.activities, existing_content + "\n" + yaml_text)
         append_ledger(
             ctx.paths.ledger, "create", data["id"], label, details=f"tags={len(data['tags'])}"
@@ -2375,7 +2439,7 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
 
     ``merge <source-id> [<source-id> ...] --into <target-id>
     [--confirm] [--on-block-conflict abort|keep-target|keep-source]
-    [--no-provenance]``
+    [--no-provenance] [--append-sources]``
 
     Tags and docs are unioned onto the target (target's order first, then new
     items in source order, de-duplicated). Schema blocks the target lacks are
@@ -2779,7 +2843,12 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
                 f"add {active_label_preview} (re-run with {opt_out_preview} to skip)"
             )
             return 1
-        desc_content_pv = lines[desc_idx_pv].split("description:", 1)[1].strip()
+        # Split on first ``:`` (not the literal ``description:`` substring)
+        # so a hand-edited entry with ``description :`` (space before colon,
+        # tolerated by ``_find_entry_field_line``) doesn't raise IndexError.
+        # v1.7.2: closes the round-6 #3 deferred HIGH.
+        desc_line_pv = lines[desc_idx_pv]
+        desc_content_pv = desc_line_pv.split(":", 1)[1].strip() if ":" in desc_line_pv else ""
         if not desc_content_pv:
             print(
                 f"ERROR: target '{target_id}' has an empty description field; "
@@ -3033,7 +3102,10 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
                 f"add {active_label} (re-run with {opt_out_advice} to skip)"
             )
             return 1
-        desc_content = lines[desc_idx].split("description:", 1)[1].strip()
+        # Same first-``:`` split semantics as the preview gate (v1.7.2
+        # round-6 #3): tolerate ``description :`` (space before colon).
+        desc_line = lines[desc_idx]
+        desc_content = desc_line.split(":", 1)[1].strip() if ":" in desc_line else ""
         if not desc_content:
             print(
                 f"ERROR: target '{target_id}' has an empty description field; cannot "
@@ -3556,18 +3628,35 @@ def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
         scope_id_vanished = (
             scope != "--all" and scope in hash_results and scope not in post_lock_ids
         )
-        # Skip the inventory rewrite + ledger entry when nothing actually
-        # changed: no new digests written, no path-drift skips, no
-        # vanished id, no concurrent additions. Avoids an unnecessary
-        # mtime bump (wakes sync/watcher tooling) and avoids a misleading
-        # ``rehashed=0`` ledger row indistinguishable from a healthy
-        # no-op.
-        wrote_anything = (
-            rehashed > 0 or skipped_path_drift or added_during_hash or scope_id_vanished
+        # Compute the --all symmetric "removed during hashing" set inside
+        # the lock so the count is stable wrt the ledger row. v1.7.2
+        # closes the round-6 #6 asymmetry — pre-fix removed_during_hash
+        # printed to stdout but never reached the ledger detail.
+        removed_during_hash: list[str] = []
+        if scope == "--all":
+            for rid in hash_results:
+                if rid not in post_lock_ids:
+                    removed_during_hash.append(rid)
+        # Save the inventory only when an actual digest changed (mtime bump
+        # exists in lockstep with on-disk content change). Ledger semantics
+        # are wider: every run that DETECTS something (any of: rehashed,
+        # path-drift, added/removed during hash, vanished, missing,
+        # malformed) writes an audit row so a --changed-since consumer
+        # sees the full detection record even when the disk wasn't
+        # written. v1.7.2 closes round-6 #5 (ledger truth vs disk truth
+        # asymmetry) and round-6 #6 (removed-during-hash invisibility).
+        detected_anything = bool(
+            rehashed
+            or skipped_path_drift
+            or added_during_hash
+            or removed_during_hash
+            or scope_id_vanished
+            or missing
+            or malformed
         )
         if rehashed > 0:
             save_files(ctx.paths.files, records)
-        if wrote_anything:
+        if detected_anything:
             detail = f"rehashed={rehashed}"
             if scope_id_vanished:
                 detail += " vanished=1"
@@ -3575,16 +3664,19 @@ def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
                 detail += f" path-drift={len(skipped_path_drift)}"
             if added_during_hash:
                 detail += f" added-during={len(added_during_hash)}"
+            if removed_during_hash:
+                detail += f" removed-during={len(removed_during_hash)}"
+            if missing:
+                detail += f" missing={len(missing)}"
+            if malformed:
+                detail += f" malformed={len(malformed)}"
+            # Tag rows that detected something but didn't change disk so
+            # ledger consumers can filter detect-only noise (e.g. an
+            # hourly cron rehashing a persistently-missing inventory).
+            # v1.7.2 round-1 #4.
+            if rehashed == 0:
+                detail += " detect-only=1"
             append_ledger(ctx.paths.ledger, "file-rehash", scope, label, detail)
-
-    # Round-4 #8: --all also surfaces records removed between phases so
-    # the user knows their hashes were silently dropped (the symmetric
-    # case to ``added_during_hash``).
-    removed_during_hash: list[str] = []
-    if scope == "--all":
-        for rid in hash_results:
-            if rid not in post_lock_ids:
-                removed_during_hash.append(rid)
 
     print(f"Rehashed {rehashed} file(s).")
     if missing:

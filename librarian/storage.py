@@ -210,11 +210,43 @@ def atomic_replace(yaml_path: Path, new_content: str) -> None:
     try:
         with open(tmp_path, "w", encoding="utf-8") as fh:
             fh.write(new_content)
+            # Force the tmp data to physical media BEFORE the rename.
+            # Without this, the rename can be atomic at the syscall level
+            # but the data block isn't yet on disk; a power loss between
+            # rename and writeback flush leaves the renamed file with
+            # zero / partial bytes. v1.7.2: closes the round-6 #7
+            # durability gap.
+            fh.flush()
+            os.fsync(fh.fileno())
         if target_path.exists():
             import shutil
 
             shutil.copymode(target_path, tmp_path)
         os.replace(tmp_path, target_path)
+        # Persist the parent directory's dentry change so the rename
+        # itself survives a crash. POSIX requires this for rename
+        # durability; without it, the rename can be lost on reboot.
+        try:
+            dirfd = os.open(target_path.parent, os.O_DIRECTORY)
+        except (OSError, AttributeError):
+            # ``os.O_DIRECTORY`` is missing on some platforms; on Windows
+            # directory fsync isn't meaningful. Skip silently.
+            pass
+        else:
+            try:
+                # Guard the fsync itself: ``os.replace`` already succeeded
+                # so the data is on disk. A directory-fsync failure here
+                # (transient EIO / EINVAL on FUSE / NFS / SMB / WSL mounts)
+                # is a durability degradation, not a correctness failure.
+                # Pre-fix the OSError escaped ``atomic_replace`` and
+                # ``append_ledger`` never ran — disk had the write, ledger
+                # didn't. v1.7.2 round-1 #3.
+                try:
+                    os.fsync(dirfd)
+                except OSError:
+                    pass
+            finally:
+                os.close(dirfd)
     except BaseException:
         # Clean up the orphan sidecar on any failure (write error,
         # copymode, replace, KeyboardInterrupt) so an interrupted write
