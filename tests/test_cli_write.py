@@ -2705,6 +2705,87 @@ def test_merge_append_sources_folds_descriptions_with_plain_text_headers(sandbox
     assert "DANGLING REF: 2026-09-mg-target" not in out
 
 
+def test_merge_append_sources_rewrites_cross_source_refs_in_bodies(sandbox):
+    """When --append-sources is on and source A's body backticks source B's
+    id, B's id must be rewritten to target_id before splicing — otherwise
+    after step 6 deletes B, the appended body holds a dangling backticked
+    ref to a now-missing entry.
+
+    Round-2 review finding #3.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    src_a = _merge_source_entry(
+        id="2026-09-mg-src-a",
+        description="A intro. See `2026-09-mg-src-b` for context.",
+    )
+    out, err, rc = sandbox.run("create", stdin=json.dumps(src_a))
+    assert rc == 0, f"src_a create failed: {err}"
+    src_b = {
+        "id": "2026-09-mg-src-b",
+        "date": "2026-09-01",
+        "title": "B",
+        "description": "B desc.",
+        "tags": ["btag"],
+        "docs": [],
+        "ptr": {"category": "scholarly", "subcategory": "cat3-other", "notes": "b"},
+    }
+    out, err, rc = sandbox.run("create", stdin=json.dumps(src_b))
+    assert rc == 0, f"src_b create failed: {err}"
+    out, err, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-src-a",
+        "2026-09-mg-src-b",
+        "--into",
+        "2026-09-mg-target",
+        "--on-block-conflict",
+        "keep-target",
+        "--append-sources",
+        "--confirm",
+    )
+    assert rc == 0, f"merge failed: {err}"
+    desc = sandbox.entry("2026-09-mg-target")["description"]
+    # B's id appears legitimately as the plain-text "## From <sid>" header
+    # for its own appended block and in the provenance one-liner; what must
+    # NOT survive is the backticked cross-reference inside A's body, since
+    # step 6 deletes B and that backtick would dangle.
+    assert "`2026-09-mg-src-b`" not in desc
+    assert "`2026-09-mg-target`" in desc
+    # validate must not flag a dangling ref from target.
+    out, _, _ = sandbox.run("validate")
+    assert "DANGLING REF: 2026-09-mg-target" not in out
+
+
+def test_merge_rewrites_backticked_source_id_inside_target_range(sandbox):
+    """Backticked source-id mentions in the TARGET's prose are live
+    cross-references and must be rewritten, even though plain-text mentions
+    in the same range are deliberately left alone.
+
+    Round-2 review finding #4. Without this pass the backtick survives,
+    step 6 deletes the source, and validate flags a fresh dangling ref.
+    """
+    target = _merge_target_entry(
+        description=(
+            "Original target description.\nSee `2026-09-mg-source` for the original write-up."
+        ),
+    )
+    sandbox.run("create", stdin=json.dumps(target))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    desc = sandbox.entry("2026-09-mg-target")["description"]
+    # Backticked mention rewritten to target_id (now self-ref, which the
+    # dangling scanner ignores per ref == eid).
+    assert "`2026-09-mg-source`" not in desc
+    assert "`2026-09-mg-target`" in desc
+    out, _, _ = sandbox.run("validate")
+    assert "DANGLING REF: 2026-09-mg-target" not in out
+
+
 def test_merge_append_sources_off_by_default(sandbox):
     """Without --append-sources, the target's description is unchanged apart
     from the optional provenance one-liner."""
@@ -2798,12 +2879,19 @@ def test_concurrent_writers_do_not_clobber_each_other(sandbox):
                 ],
                 env=full_env,
                 cwd=str(repo_root),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
         )
-    for p in procs:
-        p.wait()
+    # Wait, capture, and surface any worker failure with its stderr so a
+    # regression doesn't read as "tag missing for no reason at all".
+    for i, p in enumerate(procs):
+        stdout, stderr = p.communicate()
+        assert p.returncode == 0, (
+            f"worker {i} (add-tags concurrent-tag-{i}) exited {p.returncode}\n"
+            f"stdout: {stdout.decode(errors='replace')!r}\n"
+            f"stderr: {stderr.decode(errors='replace')!r}"
+        )
     tags = sandbox.entry("2026-04-self-study")["tags"]
     for i in range(n):
         assert f"concurrent-tag-{i}" in tags, (

@@ -20,6 +20,7 @@ This module owns three concerns:
 from __future__ import annotations
 
 import fcntl
+import os
 import sys
 import threading
 from datetime import datetime, timezone
@@ -32,7 +33,15 @@ import yaml
 # read-plan-write transaction and still call inner helpers like
 # :func:`write_lines` that also use ``write_lock``, without deadlocking on a
 # second ``fcntl.flock(LOCK_EX)`` against a fresh file descriptor to the same
-# lock file. Different threads / processes still contend exclusively.
+# lock file. Different threads / processes still contend exclusively via the
+# OS-level flock.
+#
+# Caveats: this in-process bookkeeping does NOT model fork() or asyncio. After
+# ``os.fork()`` the child inherits the parent's threading.local view; the
+# ``after_in_child`` hook below clears it so the child re-acquires its own
+# flock instead of skipping. Multiple coroutines on the same thread are not
+# supported — the second's __enter__ would no-op while the first is in its
+# critical section. No librarian writer currently uses asyncio.
 _held_locks = threading.local()
 
 
@@ -43,6 +52,19 @@ def _currently_held_locks() -> set[str]:
         held = set()
         _held_locks.set = held
     return held
+
+
+def _reset_held_after_fork() -> None:
+    """Clear the held-set in a forked child so it re-acquires its own flock."""
+    held = getattr(_held_locks, "set", None)
+    if held is not None:
+        held.clear()
+
+
+# Register the after-fork hook only where the platform supports it. Python
+# 3.7+ provides this on POSIX; Windows has no fork() and skips it.
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_held_after_fork)
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +122,11 @@ class write_lock:
         self._was_held = False
 
     def __enter__(self) -> write_lock:
+        # Always reset per-instance bookkeeping at __enter__ so a reused
+        # instance can't carry a stale `_was_held=True` from a prior context
+        # and leak the next acquire (silently skipping flock).
+        self._was_held = False
+        self._fh = None
         held = _currently_held_locks()
         if self._lock_key in held:
             # Already held by an outer frame on this thread; treat as a no-op
@@ -108,8 +135,13 @@ class write_lock:
             return self
         # Ensure the parent directory exists so the lock file can be created.
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self._lock_path, "w")
-        fcntl.flock(self._fh, fcntl.LOCK_EX)
+        fh = open(self._lock_path, "w")
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        except OSError:
+            fh.close()
+            raise
+        self._fh = fh
         held.add(self._lock_key)
         return self
 

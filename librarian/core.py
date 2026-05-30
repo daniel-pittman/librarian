@@ -202,10 +202,12 @@ _HAS_DIGIT_RE = re.compile(r"\d")
 # backtick to keep historical context tied to its own sentence.
 _HISTORICAL_PHRASES_RE = re.compile(
     r"\b(?:"
-    r"formerly|"
-    r"previously|"
-    r"originally\s+(?:tracked|known|named|filed|recorded)|"
-    r"originally|"
+    # Each historical word must be followed by a context verb to count, so a
+    # bare "previously discussed" or "formerly common practice" cannot
+    # blanket-suppress an unrelated dangling ref in the same window.
+    r"originally\s+(?:tracked|known|named|filed|recorded|logged|stored)|"
+    r"previously\s+(?:tracked|known\s+as|named|filed\s+under|recorded\s+as)|"
+    r"formerly\s+(?:tracked|known\s+as|named|filed\s+under)|"
     r"consolidat\w*\s+(?:from|under|into)|"
     r"merged\s+(?:from|into)|"
     r"renamed\s+(?:from|to)|"
@@ -268,10 +270,18 @@ def scan_dangling_refs(
                 # Treat as historical (not dangling) when a phrase like
                 # "Originally tracked under", "Previously known as",
                 # "Consolidated from" appears in the prose preceding the
-                # backtick. Catches the spec's "soften the scanner for
-                # historical mentions" ask without hiding genuine dangling
-                # refs (no phrase → still flagged).
+                # backtick. Scope: when an earlier closing backtick sits in
+                # the window, keep the phrase visible only if the text
+                # between the two backticks is a list-continuation token
+                # (` and `, `, `, ` or `). Anything else ("`a`, but see
+                # also `b`", "`a`. See also `b`") opens a new clause and the
+                # phrase no longer applies.
                 preceding = text[max(0, match.start() - _HISTORICAL_WINDOW) : match.start()]
+                last_close_backtick = preceding.rfind("`")
+                if last_close_backtick != -1:
+                    between = preceding[last_close_backtick + 1 :].strip(" \t,")
+                    if between and between.lower() not in ("and", "or", "&"):
+                        preceding = preceding[last_close_backtick + 1 :]
                 if _HISTORICAL_PHRASES_RE.search(preceding):
                     continue
                 findings.append((eid, ref, label))

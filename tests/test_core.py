@@ -177,6 +177,49 @@ def test_scan_dangling_refs_still_catches_plain_dangling_after_softening():
     assert findings[0][1] == "2024-bogus-ref"
 
 
+def test_scan_dangling_refs_does_not_blanket_skip_on_bare_originally_previously_formerly():
+    """A bare 'previously'/'originally'/'formerly' must NOT suppress an
+    unrelated dangling ref. Round-2 review finding #2: the regex previously
+    allowed those words alone, which blanket-skipped genuine dangling refs.
+
+    Now each historical word must be followed by a context verb
+    (tracked / known as / named / filed under) to count.
+    """
+    activities = [
+        _entry(
+            "2026-09-discuss",
+            description="We previously discussed approach X. See `2024-broken` for details.",
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-discuss"}, text_fields=_DESC)
+    assert findings, "bare 'previously' must not hide a dangling ref"
+    assert findings[0][1] == "2024-broken"
+
+
+def test_scan_dangling_refs_historical_window_does_not_cross_earlier_backtick():
+    """A historical phrase attached to an EARLIER backticked id must not
+    blanket-suppress a LATER, unrelated dangling id in the same sentence.
+
+    Round-2 review finding #6. Scoping the search to text after the nearest
+    earlier closing backtick keeps the phrase tied to its own ref.
+    """
+    activities = [
+        _entry(
+            "2026-09-merged",
+            description=(
+                "Originally tracked under `2024-old-id`, but see also `2024-bogus` for context."
+            ),
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-merged"}, text_fields=_DESC)
+    # 2024-old-id is historical (covered by the phrase) → suppressed.
+    # 2024-bogus is a separate ref; the phrase doesn't apply to it.
+    assert any(ref == "2024-bogus" for _, ref, _ in findings), (
+        f"historical phrase wrongly suppressed an unrelated dangling ref: {findings}"
+    )
+    assert not any(ref == "2024-old-id" for _, ref, _ in findings)
+
+
 def test_scan_dangling_refs_historical_phrase_window_is_local():
     """A historical phrase too far away (>200 chars before the backtick)
     must NOT suppress a dangling ref — otherwise stray context anywhere in

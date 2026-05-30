@@ -2462,12 +2462,14 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
         source_ranges[sid] = (s_start, s_end)
     all_source_ranges = list(source_ranges.values())
 
-    # Target's own range is also excluded from step 1's repoint. Prose mentions
-    # of source ids inside the target's description / notes (e.g. "originally
-    # tracked under <source-a>") would otherwise be silently rewritten to
-    # self-references that the dangling-ref scanner skips (scan_dangling_refs
-    # treats self-refs as not-dangling), making the rewrite invisible after
-    # the fact. Carried block content is still rewritten in step 2b.
+    # Target's own range is also excluded from step 1's repoint. Plain-text
+    # prose mentions of source ids inside the target's description / notes
+    # (e.g. "originally tracked under source-a") would otherwise be silently
+    # rewritten to self-references that the dangling-ref scanner skips
+    # (scan_dangling_refs treats self-refs as not-dangling), making the
+    # rewrite invisible after the fact. Backticked mentions inside the same
+    # range ARE rewritten by the focused pass at step 1b; carried block
+    # content is rewritten in step 2's per-block pre-splice walk.
     t_pre_start, t_pre_end = find_entry_line_range(lines, target_id)
     if t_pre_start is not None:
         repoint_skip_ranges = all_source_ranges + [(t_pre_start, t_pre_end)]
@@ -2543,6 +2545,23 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
             lines, sid, target_id, skip_ranges=repoint_skip_ranges
         )
 
+    # 1b. The target's own range was skipped so PLAIN-text prose mentions of
+    #     source ids in target's description (e.g. "Originally tracked under
+    #     source-a") stay as the user wrote them. But BACKTICKED mentions
+    #     inside the target are deliberate live cross-references and would
+    #     dangle once the source is deleted; rewrite just those.
+    if t_pre_start is not None:
+        t_lo, t_hi = find_entry_line_range(lines, target_id)
+        if t_lo is not None:
+            for sid in source_ids:
+                backtick_pattern = re.compile(rf"`{re.escape(sid)}`")
+                replacement = f"`{target_id}`"
+                for i in range(t_lo, t_hi):
+                    new_line, n = backtick_pattern.subn(replacement, lines[i])
+                    if n:
+                        lines[i] = new_line
+                        actual_repoint_total += n
+
     # 2. Carry blocks onto the target. For keep-source we may have to delete
     #    the target's existing block first; re-locate target's range before
     #    each splice because splices shift line indices below the target.
@@ -2586,7 +2605,10 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
             return new, count
         return value, 0
 
-    for bn, (_sid, block_data) in blocks_to_carry.items():
+    # Iterate a snapshot of the items so the per-iteration value rewrite isn't
+    # mutating a live view of the dict we're walking (the value-only mutation
+    # is safe on CPython today, but the snapshot keeps the pattern explicit).
+    for bn, (_sid, block_data) in list(blocks_to_carry.items()):
         rewritten_block, n = _rewrite_ids(block_data)
         actual_repoint_total += n
         blocks_to_carry[bn] = (_sid, rewritten_block)
@@ -2707,26 +2729,42 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
     #    empty scalar because YAML would silently fold an appended line into
     #    the value rather than treating it as a body line.
     if with_provenance or append_sources:
+        # Name only the description-body operations that are actually active
+        # so the error advice ("re-run with --no-provenance") doesn't tell a
+        # user who already passed --no-provenance to pass it again.
+        active = []
+        if with_provenance:
+            active.append("provenance note")
+        if append_sources:
+            active.append("--append-sources content")
+        active_label = " + ".join(active)
+        opt_outs = []
+        if with_provenance:
+            opt_outs.append("--no-provenance")
+        if append_sources:
+            opt_outs.append("drop --append-sources")
+        opt_out_advice = " or ".join(opt_outs)
+
         t_start, t_end = find_entry_line_range(lines, target_id)
         desc_idx = _find_entry_field_line(lines, t_start, t_end, "description")
         if desc_idx is None:
             print(
                 f"ERROR: target '{target_id}' has no description field; cannot "
-                f"add provenance note (re-run with --no-provenance to skip it)"
+                f"add {active_label} (re-run with {opt_out_advice} to skip)"
             )
             return 1
         desc_content = lines[desc_idx].split("description:", 1)[1].strip()
         if not desc_content:
             print(
                 f"ERROR: target '{target_id}' has an empty description field; cannot "
-                f"add provenance note (re-run with --no-provenance to skip it)"
+                f"add {active_label} (re-run with {opt_out_advice} to skip)"
             )
             return 1
         if not (desc_content.startswith("|") or desc_content.startswith(">")):
             print(
                 f"ERROR: target '{target_id}' has an inline description scalar; "
-                f"convert it to a `description: |` literal block (or pass "
-                f"--no-provenance) before merging"
+                f"convert it to a `description: |` literal block (or re-run with "
+                f"{opt_out_advice}) before merging"
             )
             return 1
         desc_indent = line_indent(lines[desc_idx])
@@ -2752,11 +2790,26 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
         if append_sources:
             # `## From <source-id>` header — plain text so backticks don't
             # trip the dangling-ref scanner after the source is deleted.
+            # Each source body has any backticked or plain-text reference to
+            # ANOTHER source rewritten to target_id before splicing, otherwise
+            # source A's `` "see `B-id` for context" `` would survive verbatim
+            # into the target after B is deleted in step 6. Use splitlines()
+            # (not split("\n")) so a CRLF-authored description doesn't strand
+            # `\r` characters in the YAML literal block.
             for s in sources:
                 sid = s.get("id")
                 body = (s.get("description") or "").strip()
+                if not body:
+                    new_body_lines.append(f"{' ' * body_indent}## From {sid}\n")
+                    new_body_lines.append(f"{' ' * body_indent}\n")
+                    continue
+                for other_sid, pattern in id_patterns.items():
+                    if other_sid == sid:
+                        continue  # leave the source's own self-mentions alone
+                    body, n = pattern.subn(target_id, body)
+                    actual_repoint_total += n
                 new_body_lines.append(f"{' ' * body_indent}## From {sid}\n")
-                for line in body.split("\n"):
+                for line in body.splitlines():
                     new_body_lines.append(f"{' ' * body_indent}{line}\n")
                 new_body_lines.append(f"{' ' * body_indent}\n")
         if with_provenance:
