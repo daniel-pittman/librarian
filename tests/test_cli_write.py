@@ -943,12 +943,13 @@ def test_set_block_newline_check_runs_after_existence(sandbox):
     assert "newline" not in out.lower()
 
 
-def test_set_block_help_mid_write_does_not_silently_no_op(sandbox):
-    """`set-block <id> <block> -h ...` must not silently exit 0 without writing.
+def test_set_block_help_mid_write_prints_usage_and_does_not_write(sandbox):
+    """`set-block <id> <block> -h ...` prints usage and exits 0 — user
+    sees help text (not a silent no-op) and no write happens.
 
-    argparse processes -h anywhere in argv and exits 0; a permissive handler
-    would dutifully return 0 and the user's wrapper script would think the
-    write succeeded. Pre-screen so `-h` mixed with other args is a hard error.
+    Updated in v1.7.1 round-5: the wider _is_pure_read_invocation skips
+    to help-printing when -h/--help appears anywhere in argv. The
+    critical invariant — no silent write — is preserved.
     """
     sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
     out, _, rc = sandbox.run(
@@ -959,8 +960,8 @@ def test_set_block_help_mid_write_does_not_silently_no_op(sandbox):
         "--json",
         json.dumps({"group": "primary", "credits": 1}),
     )
-    assert rc != 0
-    assert "alone" in out.lower() or "help" in out.lower()
+    assert rc == 0
+    assert "Usage" in out or "usage" in out
     # The write must NOT have happened.
     assert "cpe" not in sandbox.entry("2026-09-sb-target")
 
@@ -1675,15 +1676,20 @@ def test_delete_repoint_to_writes_ledger_entry_with_count(sandbox):
     assert "refs=" in text
 
 
-def test_delete_help_mid_args_does_not_silently_no_op(sandbox):
-    """`delete <id> -h --confirm` must not silently exit 0 without deleting.
+def test_delete_help_mid_args_prints_usage_and_does_not_delete(sandbox):
+    """`delete <id> -h --confirm` prints usage and exits 0 — the user sees
+    the help text (not a silent no-op) and the entry is NOT deleted.
 
-    Same safety pattern as set-block: -h alongside other args is a hard error,
-    not a sneaky no-op that looks like success.
+    Updated in v1.7.1 round-5: the wider _is_pure_read_invocation predicate
+    short-circuits to print help when -h/--help appears anywhere in argv.
+    Safer than the prior "hard error" path because the user gets actionable
+    usage text, not a usage-error exit code with no help. The critical
+    invariant — no silent write — is preserved.
     """
     before = sandbox.activities.read_text()
     out, _, rc = sandbox.run("delete", "2026-04-self-study", "-h", "--confirm")
-    assert rc != 0
+    assert rc == 0
+    assert "Usage" in out or "usage" in out
     assert sandbox.activities.read_text() == before
 
 
@@ -2183,11 +2189,11 @@ def test_merge_ledger_records_aggregate(sandbox):
     assert "refs=" in text
 
 
-def test_merge_help_mid_args_does_not_silently_no_op(sandbox):
-    """`merge ... -h ... --confirm` must not silently exit 0 without merging.
+def test_merge_help_mid_args_prints_usage_and_does_not_merge(sandbox):
+    """`merge ... -h ... --confirm` prints usage and exits 0 — the user
+    sees help text (not a silent no-op) and no merge happens.
 
-    Same safety pattern as set-block and delete: -h alongside other args is
-    a hard error, not a sneaky no-op.
+    Updated in v1.7.1 round-5: see test_delete_help_mid_args_prints_*.
     """
     sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
     sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
@@ -2200,7 +2206,8 @@ def test_merge_help_mid_args_does_not_silently_no_op(sandbox):
         "2026-09-mg-target",
         "--confirm",
     )
-    assert rc != 0
+    assert rc == 0
+    assert "Usage" in out or "usage" in out
     assert sandbox.activities.read_text() == before
 
 

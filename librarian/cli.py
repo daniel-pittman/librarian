@@ -112,25 +112,20 @@ def build_context(env: dict[str, str] | None = None) -> Context:
 def _is_pure_read_invocation(args: list[str]) -> bool:
     """True when ``args`` clearly won't reach a write path.
 
-    Conservative: matches only ``librarian <cmd> -h`` / ``librarian <cmd>
-    --help`` (i.e. the help flag is the FIRST and only argument). That's
-    the canonical "show usage" call and is guaranteed to exit before any
-    write code runs.
+    Matches ``-h`` / ``--help`` anywhere in argv. Safe because the
+    decorator's response is to PRINT HELP AND RETURN 0 (via
+    :func:`_print_help_for`), not to skip the lock and run the writer
+    function — so even if a user types ``add-tags my-id --help`` intending
+    ``--help`` as a literal tag value, no write happens. (Users who
+    really need ``--help`` as a tag must use a different value; ``--help``
+    is reserved.)
 
-    Why not also skip on ``--dry-run`` (or ``--help`` anywhere in argv)?
-    Several writer commands (``add-tags``, ``remove-tags``, ``add-docs``,
-    ``remove-docs``, ...) take user-controlled positional values and DON'T
-    route them through argparse — a legitimate positional value can be the
-    literal string ``--dry-run`` or ``--help`` (e.g. a tag named
-    ``--dry-run``). Skipping the lock on a membership test would defeat
-    the cross-process atomicity invariant the decorator was built to
-    enforce. The cost of the narrower skip is one short lock-acquire/
-    release on writer-help invocations beyond ``<cmd> --help`` — the
-    ``.lock`` sidecar is still materialized once per fresh data home,
-    which is a one-time cosmetic cost that's nowhere near a correctness
-    regression.
+    NOT matched: ``--dry-run``. Several writers accept arbitrary
+    positional values and DON'T route them through argparse — a tag named
+    ``--dry-run`` is legitimate and must take the lock to avoid a
+    cross-process atomicity hole.
     """
-    return len(args) == 1 and args[0] in ("-h", "--help")
+    return "-h" in args or "--help" in args
 
 
 def _print_help_for(func) -> int:
@@ -210,27 +205,47 @@ def _resolve_label(args: list[str], *, required: bool = True) -> str | None:
     ``None`` so the caller can abort.
     """
     label = None
-    if "--label" in args:
-        i = args.index("--label")
-        if i + 1 < len(args):
-            candidate = args[i + 1]
-            # Reject another flag as the label value. Without this guard a
-            # typo like ``--label --dry-run --json '...'`` silently swallows
-            # ``--dry-run`` as the label, drops it from argv, and the write
-            # path then runs with ``label="--dry-run"`` — completely
-            # defeating the dry-run intent and tagging the ledger with a
-            # bogus label. ``sys.exit(1)`` here (not ``return None``) so the
-            # caller can't accidentally treat the bad-value case as a
-            # missing-label and fall through to a labelless dry-run.
-            if candidate.startswith("-"):
-                print(
-                    f"ERROR: --label requires a value (got '{candidate}', "
-                    f"which looks like another flag). Format: "
-                    f"<context>:<short-purpose>, e.g. 'cli:main-curator'"
-                )
-                sys.exit(1)
+    # Pop the equals-form ``--label=foo`` first (R5 #10). One pass so a
+    # duplicate equals-form is caught by the post-loop duplicate check.
+    eq_positions = [i for i, a in enumerate(args) if a.startswith("--label=")]
+    for i in reversed(eq_positions):
+        candidate = args[i].split("=", 1)[1]
+        args.pop(i)
+        if not candidate:
+            print("ERROR: --label= requires a value after the '='")
+            sys.exit(1)
+        if label is None:
             label = candidate
-            args.pop(i + 1)
+        else:
+            print("ERROR: --label specified more than once")
+            sys.exit(1)
+    # Now the space-form ``--label foo``. Loop so duplicates raise (R5 #6).
+    while "--label" in args:
+        i = args.index("--label")
+        if i + 1 >= len(args):
+            # Trailing ``--label`` with no value (R5 #9). Reject explicitly
+            # rather than silently dropping and falling through to the
+            # "missing label" error — that hides the typo.
+            print("ERROR: --label requires a value (the flag was at the end of argv)")
+            sys.exit(1)
+        candidate = args[i + 1]
+        # Reject another flag as the label value. Without this guard a
+        # typo like ``--label --dry-run --json '...'`` silently swallows
+        # ``--dry-run`` as the label, drops it from argv, and the write
+        # path then runs with ``label="--dry-run"`` — defeating the
+        # dry-run intent and tagging the ledger with a bogus label.
+        if candidate.startswith("-"):
+            print(
+                f"ERROR: --label requires a value (got '{candidate}', "
+                f"which looks like another flag). Format: "
+                f"<context>:<short-purpose>, e.g. 'cli:main-curator'"
+            )
+            sys.exit(1)
+        if label is not None:
+            print("ERROR: --label specified more than once")
+            sys.exit(1)
+        label = candidate
+        args.pop(i + 1)
         args.pop(i)
     if not label:
         label = os.environ.get("LIBRARIAN_SESSION_LABEL")
@@ -2748,6 +2763,15 @@ def cmd_merge(ctx: Context, args: list[str]) -> int:
             " and ".join(opt_outs_preview) if len(opt_outs_preview) > 1 else opt_outs_preview[0]
         )
         t_start_pv, t_end_pv = find_entry_line_range(lines, target_id)
+        if t_start_pv is None:
+            # Target parses via load_activities but its ``- id:`` line
+            # can't be found by the string scanner (unusual quoting form
+            # or hand-edit). Match the per-source error shape; without
+            # this guard ``_find_entry_field_line`` raises ``TypeError``
+            # on ``lines[None]`` and the user gets a raw traceback
+            # (round-5 #3).
+            print(f"ERROR: cannot locate target '{target_id}' in activities; aborting")
+            return 1
         desc_idx_pv = _find_entry_field_line(lines, t_start_pv, t_end_pv, "description")
         if desc_idx_pv is None:
             print(
@@ -3482,17 +3506,24 @@ def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
     # when the record's path still matches what phase 2 hashed.
     skipped_path_drift: list[str] = []
     added_during_hash: list[str] = []  # records present in phase 3 but not phase 2
-    # ``missing`` captures rids whose path was unreachable during phase 2.
-    # Phase 3 must NOT also flag those rids as "added during hashing" — they
-    # were known at phase 2, just not hashable. Set-membership skip below.
-    missing_set = set(missing)
+    # ``missing`` and ``malformed`` both capture rids that phase 2 knew
+    # about but couldn't hash. Phase 3 must NOT also flag those rids as
+    # "added during hashing" — that bucket is for genuinely-new records
+    # only. Pre-fix the malformed-path rids leaked into added_during_hash
+    # because missing_set didn't include them (round-5 #2 HIGH).
+    phase2_known = set(missing) | set(malformed)
     with write_lock(ctx.paths.files):
         records = load_files(ctx.paths.files)
         rehashed = 0
         post_lock_ids = set()
         for record in records:
             rid = record.get("id")
-            if rid is None:
+            # Mirror phase 2's predicate exactly (round-5 #1 HIGH). Empty
+            # / whitespace ids spuriously landed in added_during_hash
+            # because phase 3 only None-guarded — every --all run then
+            # showed a bogus "added during hashing: " (blank id) notice
+            # and the ledger recorded ``added-during=1`` on every run.
+            if not rid or not str(rid).strip():
                 continue
             post_lock_ids.add(rid)
             snapshot = hash_results.get(rid)
@@ -3503,7 +3534,7 @@ def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
                 # into ``missing`` (path didn't exist on disk) so the user
                 # doesn't see both "Skipped missing" AND "added during
                 # hashing" for the same id — they're the same record.
-                if scope == "--all" and rid not in missing_set:
+                if scope == "--all" and rid not in phase2_known:
                     added_during_hash.append(rid)
                 continue
             snap_path, new_sha = snapshot

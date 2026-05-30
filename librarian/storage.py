@@ -186,6 +186,11 @@ def atomic_replace(yaml_path: Path, new_content: str) -> None:
     # destination would silently stop receiving updates.
     if yaml_path.is_symlink():
         target_path = yaml_path.resolve()
+        # The target's parent may differ from the symlink's parent (the
+        # user pointed the link at a path that doesn't exist yet). Without
+        # this mkdir the temp open() fails with a raw FileNotFoundError
+        # (round-5 #4).
+        target_path.parent.mkdir(parents=True, exist_ok=True)
     else:
         target_path = yaml_path
     tmp_path = target_path.with_suffix(target_path.suffix + ".tmp")
