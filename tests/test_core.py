@@ -123,6 +123,346 @@ def test_scan_dangling_refs_skips_hex_tokens_without_hyphens():
     assert findings == [], f"hex tokens were incorrectly flagged: {findings}"
 
 
+def test_scan_dangling_refs_skips_historical_originally_tracked():
+    """A backticked former-id preceded by 'Originally tracked under' is
+    historical context, not a dangling reference. Spec follow-up: soften the
+    scanner so consolidated/renamed history doesn't surface as broken links."""
+    activities = [
+        _entry(
+            "2026-09-merged",
+            description=(
+                "Active record. Originally tracked under `2024-old-id` before consolidation."
+            ),
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-merged"}, text_fields=_DESC)
+    assert findings == [], f"historical mention was wrongly flagged: {findings}"
+
+
+def test_scan_dangling_refs_skips_historical_previously_known_as():
+    """'Previously known as `id`' is historical context."""
+    activities = [
+        _entry(
+            "2026-09-renamed",
+            description="Previously known as `2024-legacy-id`.",
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-renamed"}, text_fields=_DESC)
+    assert findings == []
+
+
+def test_scan_dangling_refs_skips_historical_consolidated_from():
+    """'Consolidated from `id`' is historical context (the merge use case)."""
+    activities = [
+        _entry(
+            "2026-09-merged",
+            description="Consolidated from `2024-source-a` and `2024-source-b`.",
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-merged"}, text_fields=_DESC)
+    assert findings == []
+
+
+def test_scan_dangling_refs_still_catches_plain_dangling_after_softening():
+    """A backticked id with NO historical-context phrase nearby is still
+    flagged. The softening must not blanket-suppress every dangling ref."""
+    activities = [
+        _entry(
+            "2026-09-real",
+            description="Related to `2024-bogus-ref` for context.",
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-real"}, text_fields=_DESC)
+    assert findings, "real dangling ref should still be flagged"
+    assert findings[0][1] == "2024-bogus-ref"
+
+
+def test_scan_dangling_refs_does_not_blanket_skip_on_bare_originally_previously_formerly():
+    """A bare 'previously'/'originally'/'formerly' must NOT suppress an
+    unrelated dangling ref. Round-2 review finding #2: the regex previously
+    allowed those words alone, which blanket-skipped genuine dangling refs.
+
+    Now each historical word must be followed by a context verb
+    (tracked / known as / named / filed under) to count.
+    """
+    activities = [
+        _entry(
+            "2026-09-discuss",
+            description="We previously discussed approach X. See `2024-broken` for details.",
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-discuss"}, text_fields=_DESC)
+    assert findings, "bare 'previously' must not hide a dangling ref"
+    assert findings[0][1] == "2024-broken"
+
+
+def test_scan_dangling_refs_historical_window_does_not_cross_earlier_backtick():
+    """A historical phrase attached to an EARLIER backticked id must not
+    blanket-suppress a LATER, unrelated dangling id in the same sentence.
+
+    Round-2 review finding #6. Scoping the search to text after the nearest
+    earlier closing backtick keeps the phrase tied to its own ref.
+    """
+    activities = [
+        _entry(
+            "2026-09-merged",
+            description=(
+                "Originally tracked under `2024-old-id`, but see also `2024-bogus` for context."
+            ),
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-merged"}, text_fields=_DESC)
+    # 2024-old-id is historical (covered by the phrase) → suppressed.
+    # 2024-bogus is a separate ref; the phrase doesn't apply to it.
+    assert any(ref == "2024-bogus" for _, ref, _ in findings), (
+        f"historical phrase wrongly suppressed an unrelated dangling ref: {findings}"
+    )
+    assert not any(ref == "2024-old-id" for _, ref, _ in findings)
+
+
+def test_scan_dangling_refs_historical_phrase_window_is_local():
+    """A historical phrase too far away (>200 chars before the backtick)
+    must NOT suppress a dangling ref — otherwise stray context anywhere in
+    a long description would silently hide real broken links."""
+    far_away_filler = "noise " * 100  # ~600 chars
+    activities = [
+        _entry(
+            "2026-09-real",
+            description=(
+                "Originally tracked elsewhere. "
+                + far_away_filler
+                + "Related to `2024-bogus-ref` for context."
+            ),
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-real"}, text_fields=_DESC)
+    assert findings, "a far-away historical phrase must not hide a dangling ref"
+
+
+def test_scan_dangling_refs_does_not_suppress_on_bare_originally_stored_or_known():
+    """The ``originally\\s+(...)`` branch used to allow bare completers
+    (``originally stored``, ``originally known``, ``originally filed``)
+    while the matching ``previously`` / ``formerly`` branches required
+    ``as`` / ``under``. The asymmetry re-opened exactly the blanket-
+    suppression hole round-2 closed for the other branches.
+
+    Round-5 review finding #2: tighten the ``originally`` branch to the
+    same discipline — each form must be followed by its completer word
+    (``as``, ``under``).
+    """
+    activities = [
+        _entry(
+            "2026-09-stored",
+            description=(
+                "The dataset was originally stored as CSV. "
+                "See `2024-broken-ref` for migration notes."
+            ),
+        ),
+        _entry(
+            "2026-09-known",
+            description=(
+                "The helper was originally known internally as a fragile area. "
+                "Compare `2024-also-broken`."
+            ),
+        ),
+        _entry(
+            "2026-09-filed",
+            description=(
+                "The volume was originally filed by mistake; "
+                "replaced by the entry at `2024-third-broken`."
+            ),
+        ),
+    ]
+    ids = {"2026-09-stored", "2026-09-known", "2026-09-filed"}
+    findings = scan_dangling_refs(activities, ids=ids, text_fields=_DESC)
+    refs = {ref for _, ref, _ in findings}
+    assert "2024-broken-ref" in refs, (
+        f"bare 'originally stored' (no 'as') must not hide a dangling ref: {findings}"
+    )
+    assert "2024-also-broken" in refs, (
+        f"bare 'originally known' (no 'as') must not hide a dangling ref: {findings}"
+    )
+    assert "2024-third-broken" in refs, (
+        f"bare 'originally filed' (no 'under') must not hide a dangling ref: {findings}"
+    )
+
+
+def test_scan_dangling_refs_historical_phrase_survives_line_wrap():
+    """A historical phrase that wraps across a single newline (a common
+    YAML literal-block authoring pattern) must still be recognized — the
+    bare ``\\n`` is NOT a sentence boundary, only a paragraph break
+    (``\\n\\s*\\n``) or sentence-terminator-plus-whitespace is.
+
+    Round-6 review finding #1: an earlier fix treated every ``\\n`` as a
+    clause boundary, false-positively flagging the backtick below as
+    dangling because the trim discarded "Originally tracked" on the
+    prior line.
+    """
+    activities = [
+        _entry(
+            "2026-09-wrapped",
+            description="Originally tracked\nunder `2024-legacy-id`.",
+        ),
+        _entry(
+            "2026-09-wrapped-2",
+            description=(
+                "Active record.\n"
+                "Originally tracked under `2024-legacy-id-2` before\n"
+                "the consolidation."
+            ),
+        ),
+    ]
+    ids = {"2026-09-wrapped", "2026-09-wrapped-2"}
+    findings = scan_dangling_refs(activities, ids=ids, text_fields=_DESC)
+    refs = {ref for _, ref, _ in findings}
+    assert "2024-legacy-id" not in refs, (
+        f"line-wrapped historical phrase must still be recognized: {findings}"
+    )
+    assert "2024-legacy-id-2" not in refs, (
+        f"line-wrapped historical phrase must still be recognized: {findings}"
+    )
+
+
+def test_scan_dangling_refs_sentence_break_skips_decimals_and_abbreviations():
+    """Decimals (``4.2``), version numbers (``v1.0``), and short abbreviations
+    (``e.g.``, ``Dr.``) must NOT count as sentence boundaries — the lookbehind
+    of 3+ alphabetic characters rules them out. Otherwise a historical phrase
+    preceding such a token gets discarded and the backtick after it is wrongly
+    flagged as dangling.
+
+    Round-7 review finding #1 (regression from round 6's sentence-break
+    tightening).
+    """
+    activities = [
+        _entry(
+            "2026-09-spec",
+            description="Originally tracked under section 4.2 of `2024-old-spec`.",
+        ),
+        _entry(
+            "2026-09-version",
+            description="Originally tracked under v1.0 of the `2024-foo-bar` schema.",
+        ),
+        _entry(
+            "2026-09-eg",
+            description="Originally tracked e.g. under the legacy `2024-baz` index.",
+        ),
+    ]
+    ids = {"2026-09-spec", "2026-09-version", "2026-09-eg"}
+    findings = scan_dangling_refs(activities, ids=ids, text_fields=_DESC)
+    refs = {ref for _, ref, _ in findings}
+    assert "2024-old-spec" not in refs, (
+        f"decimal '4.2' must not act as a sentence boundary: {findings}"
+    )
+    assert "2024-foo-bar" not in refs, (
+        f"version 'v1.0' must not act as a sentence boundary: {findings}"
+    )
+    assert "2024-baz" not in refs, (
+        f"abbreviation 'e.g.' must not act as a sentence boundary: {findings}"
+    )
+
+
+def test_scan_dangling_refs_does_not_suppress_on_bare_named():
+    """The bare ``named`` alternative (``originally named``, ``previously
+    named``, ``formerly named`` without an ``as`` completer) must NOT
+    suppress unrelated dangling refs. Round-7 review finding #2: the
+    ``named`` form was overlooked when round-5 tightened the other
+    completers.
+    """
+    activities = [
+        _entry(
+            "2026-09-haste",
+            description=(
+                "The helper was originally named in haste during the spike. "
+                "See `2024-broken-ref` for the rewrite."
+            ),
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-haste"}, text_fields=_DESC)
+    refs = {ref for _, ref, _ in findings}
+    assert "2024-broken-ref" in refs, (
+        f"bare 'originally named' (no 'as') must not hide a dangling ref: {findings}"
+    )
+
+
+def test_scan_dangling_refs_still_skips_named_as_with_completer():
+    """The tightened ``named as`` form must still be recognized as
+    historical context."""
+    activities = [
+        _entry(
+            "2026-09-renamed-as",
+            description="Originally named as `2024-old-name` in the proposal.",
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-renamed-as"}, text_fields=_DESC)
+    assert findings == [], f"explicit 'named as' form was wrongly flagged: {findings}"
+
+
+def test_scan_dangling_refs_paragraph_break_still_scopes_phrase():
+    """Round-5's sentence-scope intent (a phrase in a PRIOR sentence does
+    not apply to a backtick in the next) still holds for the paragraph-
+    break variant. ``\\n\\s*\\n`` between an unrelated historical phrase
+    and a later backtick must scope the phrase out."""
+    activities = [
+        _entry(
+            "2026-09-paragraph",
+            description=(
+                "The dataset was originally stored as CSV.\n\n"
+                "See `2024-broken-ref` for migration notes."
+            ),
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-paragraph"}, text_fields=_DESC)
+    refs = {ref for _, ref, _ in findings}
+    assert "2024-broken-ref" in refs, "phrase in a prior paragraph must not suppress dangling ref"
+
+
+def test_scan_dangling_refs_still_skips_originally_stored_as():
+    """The tightened ``originally`` branch must still recognize the explicit
+    completer forms (``originally stored as``, ``originally known as``,
+    ``originally filed under``) as historical context."""
+    activities = [
+        _entry(
+            "2026-09-archived",
+            description=("Originally stored as `2024-archive-id` before the migration."),
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-archived"}, text_fields=_DESC)
+    assert findings == [], f"explicit completer form was wrongly flagged: {findings}"
+
+
+def test_scan_dangling_refs_does_not_suppress_on_bare_was_named_or_old_id():
+    """The bare alternatives ``was named``, ``old id`` and ``former(ly) id``
+    used to live in the historical-phrase regex. They were too generic —
+    "the function was named X" or "the old id-pattern" in narrative prose
+    would silently suppress a real dangling ref in the same window.
+
+    Round-4 review finding: drop those bare alternatives. Authors with
+    history notes still get coverage through the explicit forms
+    (``previously named``, ``formerly tracked``, etc.).
+    """
+    activities = [
+        _entry(
+            "2026-09-narrative",
+            description=(
+                "The helper was named differently in early drafts. "
+                "See `2024-broken-ref` for the latest review."
+            ),
+        ),
+        _entry(
+            "2026-09-narrative-2",
+            description=(
+                "We changed the old id-resolution path last quarter. "
+                "Tracking under `2024-also-broken` now."
+            ),
+        ),
+    ]
+    ids = {"2026-09-narrative", "2026-09-narrative-2"}
+    findings = scan_dangling_refs(activities, ids=ids, text_fields=_DESC)
+    refs = {ref for _, ref, _ in findings}
+    assert "2024-broken-ref" in refs, f"bare 'was named' must not hide a dangling ref: {findings}"
+    assert "2024-also-broken" in refs, f"bare 'old id' must not hide a dangling ref: {findings}"
+
+
 # ---------------------------------------------------------------------------
 # extract_contacts — rolodex name-walk-back boundary behavior
 # ---------------------------------------------------------------------------

@@ -112,9 +112,16 @@ by a **pluggable schema** you choose. It ships as:
   tags, docs, and missing schema blocks from one or more source entries into
   a target, repoints every inbound reference, and deletes the sources, all in
   one locked write. `--on-block-conflict=abort|keep-target|keep-source` chooses
-  how to resolve same-block collisions; `--dry-run` (the default without
-  `--confirm`) prints the full plan plus source descriptions so the caller can
-  fold the prose in by hand via `update-description`.
+  how to resolve same-block collisions; `--append-sources` opts into a
+  mechanical fold of each source's description under a `## From <id>` header;
+  `--dry-run` (the default without `--confirm`) prints the full plan plus
+  source descriptions so the caller can fold the prose in by hand via
+  `update-description`.
+- **Cross-process write lock** — every writer (`create`, `delete`, `update-*`,
+  `set-block`, `add-tags`, `remove-tags`, `add-docs`, `remove-docs`,
+  `rename-id`, `merge`, file-inventory writes) takes an exclusive advisory
+  lock around its full read-plan-write transaction, so two concurrent
+  librarian processes serialize cleanly instead of last-writer-wins.
 - **Tag normalization** — `tag-audit` flags case and separator variants of the
   same tag (e.g. `Build-A-Bot` vs `build-a-bot`) so they don't fragment your
   index over time.

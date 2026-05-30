@@ -1286,7 +1286,8 @@ def test_add_tags_skips_comment_line_before_items(sandbox):
     assert needle in text, "fixture layout changed; update this test"
     sandbox.activities.write_text(text.replace(needle, with_comment))
 
-    sandbox.run("add-tags", "2024-03-intro-security-course", "appended-tag")
+    out, err, rc = sandbox.run("add-tags", "2024-03-intro-security-course", "appended-tag")
+    assert rc == 0, f"add-tags failed: stdout={out!r} stderr={err!r}"
     tags = sandbox.entry("2024-03-intro-security-course")["tags"]
     assert tags[-1] == "appended-tag"
     assert tags[:3] == ["teaching", "cpe-primary", "course"]
@@ -2667,6 +2668,313 @@ def test_merge_keep_source_deletes_full_block_through_comment(sandbox):
     assert target["ptr"]["notes"] == "src ptr"
     # File parses cleanly (no double-block headers from a partial deletion).
     assert isinstance(target["ptr"], dict)
+
+
+def test_merge_append_sources_folds_descriptions_with_plain_text_headers(sandbox):
+    """--append-sources appends each source's description under a plain-text
+    `## From <id>` header in the target's literal-block description.
+
+    Optional flag from the original spec. Off by default. Headers must NOT be
+    backticked or the validate dangling-ref scanner would flag the
+    soon-to-be-deleted source ids.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    src = _merge_source_entry(description="Source 1 first paragraph.\nSecond paragraph.")
+    sandbox.run("create", stdin=json.dumps(src))
+    out, _, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--append-sources",
+        "--confirm",
+    )
+    assert rc == 0
+    desc = sandbox.entry("2026-09-mg-target")["description"]
+    # Original target description survives.
+    assert "Original target description." in desc
+    # Plain-text header (NOT backticked).
+    assert "## From 2026-09-mg-source" in desc
+    assert "`2026-09-mg-source`" not in desc
+    # Source body included.
+    assert "Source 1 first paragraph." in desc
+    assert "Second paragraph." in desc
+    # Default provenance one-liner is still present alongside.
+    assert "Consolidates former entries:" in desc
+    # validate is clean (the plain-text header doesn't dangle).
+    out, _, _ = sandbox.run("validate")
+    assert "DANGLING REF: 2026-09-mg-target" not in out
+
+
+def test_merge_append_sources_rewrites_cross_source_refs_in_bodies(sandbox):
+    """When --append-sources is on and source A's body backticks source B's
+    id, B's id must be rewritten to target_id before splicing — otherwise
+    after step 6 deletes B, the appended body holds a dangling backticked
+    ref to a now-missing entry.
+
+    Round-2 review finding #3.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    src_a = _merge_source_entry(
+        id="2026-09-mg-src-a",
+        description="A intro. See `2026-09-mg-src-b` for context.",
+    )
+    out, err, rc = sandbox.run("create", stdin=json.dumps(src_a))
+    assert rc == 0, f"src_a create failed: {err}"
+    src_b = {
+        "id": "2026-09-mg-src-b",
+        "date": "2026-09-01",
+        "title": "B",
+        "description": "B desc.",
+        "tags": ["btag"],
+        "docs": [],
+        "ptr": {"category": "scholarly", "subcategory": "cat3-other", "notes": "b"},
+    }
+    out, err, rc = sandbox.run("create", stdin=json.dumps(src_b))
+    assert rc == 0, f"src_b create failed: {err}"
+    out, err, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-src-a",
+        "2026-09-mg-src-b",
+        "--into",
+        "2026-09-mg-target",
+        "--on-block-conflict",
+        "keep-target",
+        "--append-sources",
+        "--confirm",
+    )
+    assert rc == 0, f"merge failed: {err}"
+    desc = sandbox.entry("2026-09-mg-target")["description"]
+    # B's id appears legitimately as the plain-text "## From <sid>" header
+    # for its own appended block and in the provenance one-liner; what must
+    # NOT survive is the backticked cross-reference inside A's body, since
+    # step 6 deletes B and that backtick would dangle.
+    assert "`2026-09-mg-src-b`" not in desc
+    assert "`2026-09-mg-target`" in desc
+    # validate must not flag a dangling ref from target.
+    out, _, _ = sandbox.run("validate")
+    assert "DANGLING REF: 2026-09-mg-target" not in out
+
+
+def test_merge_append_sources_rewrites_self_backticks_in_bodies(sandbox):
+    """When --append-sources is on and a source body backticks its OWN id,
+    that backtick must also be rewritten to target_id — once the body lives
+    in the target's description and step 6 deletes the source, the self-ref
+    would otherwise become a dangling backticked reference to a now-missing
+    entry.
+
+    Round-4 review finding: the prior heuristic skipped self-mentions on
+    the (wrong) reasoning that they were the author's own narrative; in
+    fact every backticked source id is a reference to an entry that step 6
+    is about to delete, including self-mentions.
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    src = _merge_source_entry(
+        description="See `2026-09-mg-source` in the prior write-up for context.",
+    )
+    out, err, rc = sandbox.run("create", stdin=json.dumps(src))
+    assert rc == 0, f"src create failed: {err}"
+    out, err, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--append-sources",
+        "--confirm",
+    )
+    assert rc == 0, f"merge failed: {err}"
+    desc = sandbox.entry("2026-09-mg-target")["description"]
+    # The self-backtick must be rewritten to target_id.
+    assert "`2026-09-mg-source`" not in desc
+    assert "`2026-09-mg-target`" in desc
+    # validate is clean.
+    out, _, _ = sandbox.run("validate")
+    assert "DANGLING REF: 2026-09-mg-target" not in out
+
+
+def test_merge_append_sources_preserves_plain_text_source_id_mentions(sandbox):
+    """Plain-text (un-backticked) mentions of a source id in a source body
+    must NOT be rewritten when --append-sources splices the body into the
+    target's description.
+
+    Round-5 review finding #1: a word-boundary regex would silently
+    rewrite narrative like "Originally tracked under <sid> before
+    consolidation" into a fabricated self-reference. The append-sources
+    body rewrite must be backtick-anchored (matching step 1b's pattern).
+    """
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    src = _merge_source_entry(
+        description=(
+            "Originally tracked under 2026-09-mg-source before consolidation. "
+            "See `2026-09-mg-source` for the prior write-up."
+        ),
+    )
+    out, err, rc = sandbox.run("create", stdin=json.dumps(src))
+    assert rc == 0, f"src create failed: {err}"
+    out, err, rc = sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--append-sources",
+        "--confirm",
+    )
+    assert rc == 0, f"merge failed: {err}"
+    desc = sandbox.entry("2026-09-mg-target")["description"]
+    # Plain-text mention survives intact — the author's historical claim
+    # ("Originally tracked under <sid>") must not be silently rewritten
+    # into a fabricated self-reference ("Originally tracked under <target>").
+    assert "Originally tracked under 2026-09-mg-source before consolidation" in desc, (
+        "plain-text mention of source id was silently rewritten — "
+        "the body rewrite must be backtick-anchored, not word-boundary"
+    )
+    # Backticked mention IS still rewritten to target_id (round-4 fix).
+    assert "`2026-09-mg-source`" not in desc
+    assert "`2026-09-mg-target`" in desc
+
+
+def test_merge_rewrites_backticked_source_id_inside_target_range(sandbox):
+    """Backticked source-id mentions in the TARGET's prose are live
+    cross-references and must be rewritten, even though plain-text mentions
+    in the same range are deliberately left alone.
+
+    Round-2 review finding #4. Without this pass the backtick survives,
+    step 6 deletes the source, and validate flags a fresh dangling ref.
+    """
+    target = _merge_target_entry(
+        description=(
+            "Original target description.\nSee `2026-09-mg-source` for the original write-up."
+        ),
+    )
+    sandbox.run("create", stdin=json.dumps(target))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    desc = sandbox.entry("2026-09-mg-target")["description"]
+    # Backticked mention rewritten to target_id (now self-ref, which the
+    # dangling scanner ignores per ref == eid).
+    assert "`2026-09-mg-source`" not in desc
+    assert "`2026-09-mg-target`" in desc
+    out, _, _ = sandbox.run("validate")
+    assert "DANGLING REF: 2026-09-mg-target" not in out
+
+
+def test_merge_append_sources_off_by_default(sandbox):
+    """Without --append-sources, the target's description is unchanged apart
+    from the optional provenance one-liner."""
+    sandbox.run("create", stdin=json.dumps(_merge_target_entry()))
+    src = _merge_source_entry(description="Source body NOT appended.")
+    sandbox.run("create", stdin=json.dumps(src))
+    sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    desc = sandbox.entry("2026-09-mg-target")["description"]
+    assert "Source body NOT appended." not in desc
+    assert "## From " not in desc
+
+
+def test_merge_leaves_target_prose_mentions_of_source_id_alone(sandbox):
+    """Prose mentions of a source id inside the target's own description
+    must not be silently rewritten to self-references.
+
+    Round-2 review finding #8 (deferred to this cleanup PR). rename-id's
+    rewriter is broad by design (every mention everywhere); merge limits
+    that scope so the target's own descriptive prose about a source id
+    survives intact for the human to edit. Self-refs would otherwise be
+    invisible to validate (scan_dangling_refs skips ref == eid).
+    """
+    target = _merge_target_entry(
+        description=(
+            "Original target description.\n"
+            "Originally tracked under 2026-09-mg-source before consolidation."
+        ),
+    )
+    sandbox.run("create", stdin=json.dumps(target))
+    sandbox.run("create", stdin=json.dumps(_merge_source_entry()))
+    sandbox.run(
+        "merge",
+        "2026-09-mg-source",
+        "--into",
+        "2026-09-mg-target",
+        "--confirm",
+    )
+    desc = sandbox.entry("2026-09-mg-target")["description"]
+    # The prose mention of the source id stays as the user wrote it.
+    assert "2026-09-mg-source before consolidation" in desc
+    # And it did NOT become a self-reference.
+    assert "2026-09-mg-target before consolidation" not in desc
+
+
+# ---------------------------------------------------------------------------
+# write-lock concurrency
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_writers_do_not_clobber_each_other(sandbox):
+    """Two writer processes hammering the same activities file must serialize
+    cleanly: every write must land, none silently lost.
+
+    Pins the cross-process write_lock that wraps read-plan-write. Without it,
+    two writers each reading their own snapshot and writing it back would
+    last-writer-wins one of them.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    # Derive the repo root from this test file's location so the test works
+    # on any checkout (local + CI), not a hardcoded developer path.
+    repo_root = Path(__file__).resolve().parent.parent
+
+    # Launch N parallel add-tags invocations against the same entry; each adds
+    # a distinct tag. All N writes must survive.
+    procs = []
+    n = 8
+    full_env = {
+        **sandbox.env,
+        "PATH": "/usr/bin:/bin",
+        "LIBRARIAN_SESSION_LABEL": "test:concurrent",
+    }
+    for i in range(n):
+        procs.append(
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "librarian.cli",
+                    "add-tags",
+                    "2026-04-self-study",
+                    f"concurrent-tag-{i}",
+                ],
+                env=full_env,
+                cwd=str(repo_root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        )
+    # Wait, capture, and surface any worker failure with its stderr so a
+    # regression doesn't read as "tag missing for no reason at all".
+    for i, p in enumerate(procs):
+        stdout, stderr = p.communicate()
+        assert p.returncode == 0, (
+            f"worker {i} (add-tags concurrent-tag-{i}) exited {p.returncode}\n"
+            f"stdout: {stdout.decode(errors='replace')!r}\n"
+            f"stderr: {stderr.decode(errors='replace')!r}"
+        )
+    tags = sandbox.entry("2026-04-self-study")["tags"]
+    for i in range(n):
+        assert f"concurrent-tag-{i}" in tags, (
+            f"tag concurrent-tag-{i} was lost to a concurrent writer"
+        )
 
 
 # ---------------------------------------------------------------------------
