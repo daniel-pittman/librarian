@@ -208,8 +208,24 @@ _HISTORICAL_PHRASES_RE = re.compile(
     r"originally\s+(?:tracked|known\s+as|named\s+as|filed\s+under|recorded\s+as|stored\s+as|logged\s+as)|"
     r"previously\s+(?:tracked|known\s+as|named\s+as|filed\s+under|recorded\s+as)|"
     r"formerly\s+(?:tracked|known\s+as|named\s+as|filed\s+under)|"
-    r"consolidat\w*\s+(?:from|under|into)|"
-    r"merged\s+(?:from|into)|"
+    # Finite verb forms only (drop the open ``\w*`` quantifier). For the
+    # ``from`` direction, accept the phrase anywhere — that prepositional
+    # phrase always introduces a former identity. For ``into`` / ``under``,
+    # require the phrase to sit immediately before the backticked id (the
+    # scanner passes only the text BEFORE the backtick to
+    # ``_HISTORICAL_PHRASES_RE.search``, so ``$`` is the position just
+    # before the backtick) OR be followed by an existing backtick-pair +
+    # list-continuation token (``and`` / ``or`` / ``&`` / ``,``) — the
+    # list-continuation arm preserves recognition of "Merged into `a` and
+    # `b`" while still rejecting generic prose like "merged into main last
+    # week" or "consolidation into a single index" (which would have
+    # additional non-backtick prose between the phrase and the next
+    # backticked id).
+    r"consolidat(?:e|es|ed|ing)\s+from|"
+    r"consolidat(?:e|es|ed|ing)\s+(?:into|under)"
+    r"(?=\s*(?:$|`[^`]*`\s*(?:and|or|&|,|;)))|"
+    r"merged\s+from|"
+    r"merged\s+into(?=\s*(?:$|`[^`]*`\s*(?:and|or|&|,|;)))|"
     r"renamed\s+(?:from|to)|"
     r"superseded\s+by"
     # The bare alternatives "old id", "former(ly) id" and "was named/known as"
@@ -221,6 +237,15 @@ _HISTORICAL_PHRASES_RE = re.compile(
     re.IGNORECASE,
 )
 _HISTORICAL_WINDOW = 200  # chars before the backtick we'll scan for a phrase
+
+# Matches a completed pair of backticks (``backtick + non-backtick chars +
+# backtick``). The scanner uses ``.end() - 1`` of the LAST pair as the
+# clause boundary in the look-back window, rather than ``rfind("`")``,
+# so an unmatched stray backtick or a backtick whose partner sits outside
+# the look-back window doesn't misroute the boundary. The inner class is
+# ``[^`]*`` (any-except-backtick) so adjacent pairs ("`a` `b`") match as
+# two separate pairs, not one greedy run.
+_BACKTICK_PAIR_RE = re.compile(r"`[^`]*`")
 
 # Matches the LAST sentence/clause boundary in a window of preceding text.
 # A boundary is either:
@@ -301,21 +326,31 @@ def scan_dangling_refs(
                 # longer applies to `2024-foo`.
                 #
                 # Step 2 — earlier-backtick clause boundary: when an
-                # earlier closing backtick sits in the window, keep the
-                # phrase visible only if the text between the two
-                # backticks is a list-continuation token (` and `, `, `,
-                # ` or `). Anything else ("`a`, but see also `b`",
-                # "`a`. See also `b`") opens a new clause and the phrase
-                # no longer applies.
+                # earlier MATCHED backtick pair sits in the window, keep
+                # the phrase visible only if the text between the pair's
+                # close and the current backtick is a list-continuation
+                # token (` and `, `, `, ` or `). Anything else
+                # ("`a`, but see also `b`", "`a`. See also `b`") opens a
+                # new clause and the phrase no longer applies. We look
+                # for completed PAIRS (not raw rfind) so a stray /
+                # unmatched backtick or a window-edge straddle doesn't
+                # misroute the boundary.
                 preceding = text[max(0, match.start() - _HISTORICAL_WINDOW) : match.start()]
                 sentence_break = _LAST_SENTENCE_BREAK_RE.search(preceding)
                 if sentence_break is not None:
                     preceding = preceding[sentence_break.end() :]
-                last_close_backtick = preceding.rfind("`")
-                if last_close_backtick != -1:
-                    between = preceding[last_close_backtick + 1 :].strip(" \t,")
+                pair_matches = list(_BACKTICK_PAIR_RE.finditer(preceding))
+                if pair_matches:
+                    last_close_pos = pair_matches[-1].end() - 1
+                    # Strip includes ``\r``, ``\n``, ``,`` and ``;`` so a
+                    # multi-line continuation list ("Originally tracked
+                    # under `a`,\n  and `b`") or a semicolon-separated
+                    # audit list ("Merged into `a`; `b`") still recognizes
+                    # the continuation rather than treating the leading
+                    # whitespace / punctuation as a clause break.
+                    between = preceding[last_close_pos + 1 :].strip(" \t,;\r\n")
                     if between and between.lower() not in ("and", "or", "&"):
-                        preceding = preceding[last_close_backtick + 1 :]
+                        preceding = preceding[last_close_pos + 1 :]
                 if _HISTORICAL_PHRASES_RE.search(preceding):
                     continue
                 findings.append((eid, ref, label))

@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from .storage import write_lock
+from .storage import atomic_replace, write_lock
 
 # Canonical field order for serialised records — keeps files.yaml diffs stable.
 _FILE_KEY_ORDER = ("id", "path", "category", "title", "description", "sha256", "added")
@@ -51,17 +51,15 @@ def save_files(files_path: Path, records: list[dict]) -> None:
         return out
 
     ordered = [_ordered(r) for r in sorted(records, key=lambda r: r.get("id", ""))]
+    rendered = yaml.dump(
+        {"files": ordered},
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
+        width=120,
+    )
     with write_lock(files_path):
-        files_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(files_path, "w", encoding="utf-8") as fh:
-            yaml.dump(
-                {"files": ordered},
-                fh,
-                default_flow_style=False,
-                allow_unicode=True,
-                sort_keys=False,
-                width=120,
-            )
+        atomic_replace(files_path, rendered)
 
 
 def slugify_filename(path: str) -> str:

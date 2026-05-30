@@ -116,7 +116,20 @@ class write_lock:
     """
 
     def __init__(self, resource_path: Path):
-        self._lock_path = resource_path.with_suffix(resource_path.suffix + ".lock")
+        # Anchor the lock sidecar to the resolved target's path, not the
+        # symlink's. ``atomic_replace`` writes through the symlink to the
+        # target inode; if the lock keyed on the symlink's path, two
+        # processes with different aliases to the same target would each
+        # hold their OWN sidecar lock and write the target file
+        # concurrently — last writer wins, the other's entry lost.
+        # Resolves to the link target if symlinked, else to itself.
+        try:
+            anchor_path = resource_path.resolve() if resource_path.is_symlink() else resource_path
+        except OSError:
+            # Resolution can fail for broken symlinks; fall back to the
+            # unresolved path so the lock still operates locally.
+            anchor_path = resource_path
+        self._lock_path = anchor_path.with_suffix(anchor_path.suffix + ".lock")
         self._lock_key = str(self._lock_path)
         self._fh = None
         self._was_held = False
@@ -155,23 +168,79 @@ class write_lock:
         return False  # never suppress exceptions
 
 
+def atomic_replace(yaml_path: Path, new_content: str) -> None:
+    """Atomically replace ``yaml_path`` with ``new_content``.
+
+    Writes a temp sidecar then ``os.replace`` over the target. Preserves
+    the target's existing mode bits when present — ``os.replace`` would
+    otherwise adopt the tmp file's umask-default mode and silently revert
+    a ``chmod 600`` the user (or downstream packaging) applied for
+    access restriction. On failure (write error, copymode error) the
+    temp sidecar is removed so the user doesn't accumulate orphan
+    ``.tmp`` files after an interrupted write.
+
+    Caveats (acknowledged for the multi-user data home case): ``os.replace``
+    swaps the inode, so the file's uid/gid after the write reflect the
+    running process's uid/gid, not the target's pre-write owner. In a
+    shared-data-home deployment (mode 660 service-user file), the first
+    write by a different uid silently rechowns the file. ``shutil.copystat``
+    + ``os.chown`` would close this, but ``chown`` to an arbitrary uid/gid
+    needs ``CAP_CHOWN`` — not assumable. Single-user installations are
+    unaffected.
+
+    Caller must hold the resource's :class:`write_lock`.
+    """
+    yaml_path.parent.mkdir(parents=True, exist_ok=True)
+    # Resolve symlinks before writing so the atomic-replace operates on the
+    # link's TARGET, not the link itself. Without this, ``os.replace`` would
+    # silently destroy the symlink — a user who aliased their data home into
+    # a synced folder (Syncthing, Dropbox, NFS mount) would see the link
+    # replaced by a local file on the first write, and the synced
+    # destination would silently stop receiving updates.
+    if yaml_path.is_symlink():
+        target_path = yaml_path.resolve()
+        # The target's parent may differ from the symlink's parent (the
+        # user pointed the link at a path that doesn't exist yet). Without
+        # this mkdir the temp open() fails with a raw FileNotFoundError
+        # (round-5 #4).
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        target_path = yaml_path
+    tmp_path = target_path.with_suffix(target_path.suffix + ".tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            fh.write(new_content)
+        if target_path.exists():
+            import shutil
+
+            shutil.copymode(target_path, tmp_path)
+        os.replace(tmp_path, target_path)
+    except BaseException:
+        # Clean up the orphan sidecar on any failure (write error,
+        # copymode, replace, KeyboardInterrupt) so an interrupted write
+        # doesn't leave the user with a stray ``.tmp`` file and (on first
+        # run) an empty target.
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def write_lines(yaml_path: Path, lines: list[str]) -> None:
-    """Write `lines` to the activities file under an exclusive lock."""
-    with write_lock(yaml_path):
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(yaml_path, "w", encoding="utf-8") as fh:
-            fh.writelines(lines)
+    """Write `lines` to the activities file under an exclusive lock.
 
-
-def append_text(yaml_path: Path, text: str) -> None:
-    """Append `text` to the activities file under an exclusive lock.
-
-    Used by ``create`` to add a new entry without rewriting the whole file.
+    Atomic from a concurrent reader's POV via temp+``os.replace``.
     """
     with write_lock(yaml_path):
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(yaml_path, "a", encoding="utf-8") as fh:
-            fh.write(text)
+        atomic_replace(yaml_path, "".join(lines))
+
+
+# ``append_text`` was removed in v1.7.1. ``cmd_create`` now inlines the
+# read-existing + concat + atomic_replace dance directly inside its lock-
+# protected write phase, and no other caller used it. The atomic-rewrite
+# trade (full O(N) rewrite per create) is documented at the create call
+# site rather than buried in a one-line helper.
 
 
 # ---------------------------------------------------------------------------

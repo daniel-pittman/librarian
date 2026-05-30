@@ -397,6 +397,200 @@ def test_scan_dangling_refs_still_skips_named_as_with_completer():
     assert findings == [], f"explicit 'named as' form was wrongly flagged: {findings}"
 
 
+def test_scan_dangling_refs_consolidat_noun_does_not_match():
+    """``consolidation into a single index`` is generic prose, not historical
+    provenance. The over-broad ``consolidat\\w*`` quantifier was tightened
+    to past-tense finite forms (``consolidate[ds]?``) so noun usage no
+    longer blanket-suppresses unrelated dangling refs.
+
+    v1.7.1 follow-up (round-5 review #4).
+    """
+    activities = [
+        _entry(
+            "2026-09-noun",
+            description=(
+                "The schema consolidation into a single index improved query speed. "
+                "See `2024-broken-ref` for the implementation."
+            ),
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-noun"}, text_fields=_DESC)
+    refs = {ref for _, ref, _ in findings}
+    assert "2024-broken-ref" in refs, (
+        f"'consolidation into' (noun) must not act as historical context: {findings}"
+    )
+
+
+def test_scan_dangling_refs_merged_into_main_does_not_match():
+    """``merged into main`` is generic dev/git prose, not historical
+    provenance. The ``merged\\s+(?:from|into)`` alternation was tightened
+    to just ``merged\\s+from`` (the merge-history use case).
+
+    v1.7.1 follow-up (round-5 review #4).
+    """
+    activities = [
+        _entry(
+            "2026-09-into-main",
+            description=(
+                "This branch was merged into main last week. "
+                "Compare with `2024-broken-ref` for the alternative approach."
+            ),
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-into-main"}, text_fields=_DESC)
+    refs = {ref for _, ref, _ in findings}
+    assert "2024-broken-ref" in refs, (
+        f"'merged into main' must not act as historical context: {findings}"
+    )
+
+
+def test_scan_dangling_refs_consolidated_from_still_recognized():
+    """The legitimate historical forms ``Consolidated from`` / ``Consolidates
+    from`` / ``Consolidating from`` are still recognized after the
+    tightening — only the noun ``consolidation`` and the ``merged into``
+    alternatives were dropped. The ``ing`` form covers in-progress
+    consolidations the user wants to pre-record."""
+    activities = [
+        _entry(
+            "2026-09-merged-finite",
+            description="Consolidated from `2024-source-a` and `2024-source-b`.",
+        ),
+        _entry(
+            "2026-09-merged-from",
+            description="Merged from `2024-old-x` before the cleanup.",
+        ),
+        _entry(
+            "2026-09-ing-finite",
+            description="Consolidating from `2024-old-y` over the next quarter.",
+        ),
+    ]
+    ids = {"2026-09-merged-finite", "2026-09-merged-from", "2026-09-ing-finite"}
+    findings = scan_dangling_refs(activities, ids=ids, text_fields=_DESC)
+    assert findings == [], f"historical finite forms wrongly flagged: {findings}"
+
+
+def test_scan_dangling_refs_into_under_list_continuation():
+    """Round-3 review #3: the legitimate historical list ``Merged into
+    `a` and `b``` (or with ``consolidated under`` / ``consolidated into``)
+    must still suppress every backticked id in the list — not just the
+    first. The round-2 ``(?=\\s*$)`` lookahead was strict-end-only and
+    broke list-continuation; round-3 relaxes it to also accept a
+    backtick-pair + continuation token following the phrase.
+    """
+    activities = [
+        _entry(
+            "2026-09-merged-list",
+            description="Merged into `2024-old-a` and `2024-old-b`.",
+        ),
+        _entry(
+            "2026-09-cons-into-list",
+            description="Consolidated into `2024-old-c`, `2024-old-d` and `2024-old-e`.",
+        ),
+        _entry(
+            "2026-09-cons-under-list",
+            description="Consolidated under `2024-old-f` or `2024-old-g`.",
+        ),
+    ]
+    ids = {
+        "2026-09-merged-list",
+        "2026-09-cons-into-list",
+        "2026-09-cons-under-list",
+    }
+    findings = scan_dangling_refs(activities, ids=ids, text_fields=_DESC)
+    assert findings == [], f"historical list-continuation forms wrongly flagged: {findings}"
+
+
+def test_scan_dangling_refs_into_under_with_backtick_recognized():
+    """Restored after round-2 review #5: legitimate historical forms
+    ``Merged into `<id>``` and ``Consolidated under `<id>``` (where the
+    historical id is preserved in audit prose) are still recognized,
+    while generic dev prose ``merged into main`` / ``consolidation into
+    a single index`` (no immediately-following backtick) is NOT.
+    """
+    historical = [
+        _entry(
+            "2026-09-into-id",
+            description="Merged into `2024-old-x` per the spring cleanup.",
+        ),
+        _entry(
+            "2026-09-under-id",
+            description="Consolidated under `2024-old-y` for audit history.",
+        ),
+        _entry(
+            "2026-09-into-finite",
+            description="Consolidated into `2024-old-z` last quarter.",
+        ),
+    ]
+    h_ids = {"2026-09-into-id", "2026-09-under-id", "2026-09-into-finite"}
+    findings = scan_dangling_refs(historical, ids=h_ids, text_fields=_DESC)
+    assert findings == [], (
+        f"historical 'merged into <id>' / 'consolidated under <id>' wrongly flagged: {findings}"
+    )
+
+    # Generic prose still must NOT suppress unrelated dangling refs.
+    generic = [
+        _entry(
+            "2026-09-merged-into-main",
+            description=(
+                "This branch was merged into main last week. "
+                "Compare with `2024-broken-x` for the alternative."
+            ),
+        ),
+        _entry(
+            "2026-09-index-noun",
+            description=(
+                "Consolidation into a single index improved query speed. "
+                "See `2024-broken-y` for the patch."
+            ),
+        ),
+    ]
+    g_ids = {"2026-09-merged-into-main", "2026-09-index-noun"}
+    findings = scan_dangling_refs(generic, ids=g_ids, text_fields=_DESC)
+    refs = {ref for _, ref, _ in findings}
+    assert "2024-broken-x" in refs and "2024-broken-y" in refs, (
+        f"generic prose wrongly suppressed dangling refs: {findings}"
+    )
+
+
+def test_scan_dangling_refs_multiline_continuation_list_handled():
+    """A historical continuation list that wraps across a newline must
+    still recognize the ``and`` / ``or`` continuation token, even though
+    the leading whitespace before ``and`` is now a newline. The strip set
+    was extended to include ``\\r\\n``.
+
+    v1.7.1 follow-up (round-5 review #6).
+    """
+    activities = [
+        _entry(
+            "2026-09-wrap-list",
+            description=("Originally tracked under `2024-old-a`,\n      and `2024-old-b`."),
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-wrap-list"}, text_fields=_DESC)
+    assert findings == [], f"line-wrapped 'and' continuation must keep historical scope: {findings}"
+
+
+def test_scan_dangling_refs_stray_backtick_does_not_misroute_scope():
+    """An unmatched stray backtick in the window (e.g. an unclosed inline
+    code mid-edit, or a literal placeholder symbol) must not misroute the
+    clause boundary. The look-back now scopes by matched backtick PAIRS,
+    not raw rfind, so a lone backtick is ignored.
+
+    v1.7.1 follow-up (round-5 #5 / round-7 #5).
+    """
+    activities = [
+        _entry(
+            "2026-09-stray",
+            description=(
+                "Originally tracked under ` (this is a placeholder symbol) "
+                "the system at `2024-old-id`."
+            ),
+        ),
+    ]
+    findings = scan_dangling_refs(activities, ids={"2026-09-stray"}, text_fields=_DESC)
+    assert findings == [], f"stray backtick misrouted clause scope: {findings}"
+
+
 def test_scan_dangling_refs_paragraph_break_still_scopes_phrase():
     """Round-5's sentence-scope intent (a phrase in a PRIOR sentence does
     not apply to a backtick in the next) still holds for the paragraph-
