@@ -116,7 +116,20 @@ class write_lock:
     """
 
     def __init__(self, resource_path: Path):
-        self._lock_path = resource_path.with_suffix(resource_path.suffix + ".lock")
+        # Anchor the lock sidecar to the resolved target's path, not the
+        # symlink's. ``atomic_replace`` writes through the symlink to the
+        # target inode; if the lock keyed on the symlink's path, two
+        # processes with different aliases to the same target would each
+        # hold their OWN sidecar lock and write the target file
+        # concurrently — last writer wins, the other's entry lost.
+        # Resolves to the link target if symlinked, else to itself.
+        try:
+            anchor_path = resource_path.resolve() if resource_path.is_symlink() else resource_path
+        except OSError:
+            # Resolution can fail for broken symlinks; fall back to the
+            # unresolved path so the lock still operates locally.
+            anchor_path = resource_path
+        self._lock_path = anchor_path.with_suffix(anchor_path.suffix + ".lock")
         self._lock_key = str(self._lock_path)
         self._fh = None
         self._was_held = False
