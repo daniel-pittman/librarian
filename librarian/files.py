@@ -17,6 +17,7 @@ digest, and an ``added`` date.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,7 +54,13 @@ def save_files(files_path: Path, records: list[dict]) -> None:
     ordered = [_ordered(r) for r in sorted(records, key=lambda r: r.get("id", ""))]
     with write_lock(files_path):
         files_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(files_path, "w", encoding="utf-8") as fh:
+        # Atomic from a concurrent reader's POV: write to a sidecar then
+        # ``os.replace`` it over the target. Without this, an in-flight
+        # ``open(files_path, "w")`` briefly truncates the file and an
+        # unlocked ``load_files`` can land on the empty window, raising
+        # YAMLError or returning ``{}``.
+        tmp_path = files_path.with_suffix(files_path.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as fh:
             yaml.dump(
                 {"files": ordered},
                 fh,
@@ -62,6 +69,7 @@ def save_files(files_path: Path, records: list[dict]) -> None:
                 sort_keys=False,
                 width=120,
             )
+        os.replace(tmp_path, files_path)
 
 
 def slugify_filename(path: str) -> str:

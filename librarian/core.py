@@ -208,13 +208,13 @@ _HISTORICAL_PHRASES_RE = re.compile(
     r"originally\s+(?:tracked|known\s+as|named\s+as|filed\s+under|recorded\s+as|stored\s+as|logged\s+as)|"
     r"previously\s+(?:tracked|known\s+as|named\s+as|filed\s+under|recorded\s+as)|"
     r"formerly\s+(?:tracked|known\s+as|named\s+as|filed\s+under)|"
-    # Past-tense finite forms only (drop the open ``\w*`` quantifier and the
+    # Finite verb forms only (drop the open ``\w*`` quantifier and the
     # "into" / non-historical alternatives). "consolidation into a single
     # index" or "merged into main last week" should NOT count as historical
     # provenance — those are generic dev/operations prose. The merge-history
-    # use case the scanner cares about is "Consolidated from `<id>`" and
-    # "Merged from `<id>`".
-    r"consolidate[ds]?\s+from|"
+    # use cases the scanner cares about are "Consolidat(e|es|ed|ing) from
+    # `<id>`" and "Merged from `<id>`".
+    r"consolidat(?:e|es|ed|ing)\s+from|"
     r"merged\s+from|"
     r"renamed\s+(?:from|to)|"
     r"superseded\s+by"

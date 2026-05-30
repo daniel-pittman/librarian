@@ -156,11 +156,20 @@ class write_lock:
 
 
 def write_lines(yaml_path: Path, lines: list[str]) -> None:
-    """Write `lines` to the activities file under an exclusive lock."""
+    """Write `lines` to the activities file under an exclusive lock.
+
+    Atomic from a concurrent reader's point of view: we write to a temp
+    sidecar then ``os.replace`` it over the target. Without this, an
+    in-progress ``open(yaml_path, "w")`` briefly truncates the file, and
+    an unlocked reader (e.g. ``cmd_create``'s pre-lock snapshot) can see
+    a partial / empty file → ``yaml.safe_load`` raises or returns nothing.
+    """
     with write_lock(yaml_path):
         yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(yaml_path, "w", encoding="utf-8") as fh:
+        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as fh:
             fh.writelines(lines)
+        os.replace(tmp_path, yaml_path)
 
 
 def append_text(yaml_path: Path, text: str) -> None:

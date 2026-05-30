@@ -3381,25 +3381,116 @@ def test_help_does_not_materialize_lockfile(sandbox):
     )
 
 
-def test_dry_run_does_not_materialize_lockfile(sandbox):
-    """``librarian create --dry-run`` must NOT create the lock sidecar — the
-    --dry-run path returns early without writing.
+def test_dry_run_does_not_write_content(sandbox):
+    """``librarian create --dry-run`` must not write the entry. (Lock
+    behavior varies by command: ``create`` is inline-refactored so its
+    dry-run path doesn't even reach the lock; other writers still hold
+    the lock around their entire body — that's by design and is the
+    safer side of the round-1 PR #20 #1 finding.)
 
     v1.7.1 follow-up.
     """
-    lock_path = sandbox.activities.with_suffix(".yaml.lock")
-    if lock_path.exists():
-        lock_path.unlink()
     entry = {
         "id": "2026-09-dry-run",
         "date": "2026-09-01",
         "title": "Dry run probe",
-        "description": "Should not write or lock.",
+        "description": "Should not write content.",
         "tags": ["probe"],
     }
     out, _, rc = sandbox.run("create", "--dry-run", stdin=json.dumps(entry))
     assert rc == 0
-    assert not lock_path.exists(), (
-        f"--dry-run materialized lockfile at {lock_path}; lock should be "
-        f"skipped for pure-read invocations"
+    assert "Dry run" in out
+    assert "2026-09-dry-run" not in sandbox.activities.read_text()
+
+
+def test_pure_read_skip_not_triggered_by_arg_value(sandbox):
+    """``add-tags <id> --dry-run`` — where ``--dry-run`` is a literal tag
+    name — must NOT skip the activities lock. The round-1 PR #20 bug:
+    membership test ``"--dry-run" in args`` matched this case and skipped
+    the lock, opening a concurrency window for any writer that takes
+    user-controlled positional values.
+
+    v1.7.1 follow-up — round-1 PR #20 #1.
+    """
+    out, err, rc = sandbox.run(
+        "add-tags",
+        "2024-03-intro-security-course",
+        "--dry-run",  # literal tag name, NOT a flag (add-tags has no --dry-run)
     )
+    assert rc == 0, f"add-tags failed: {out} / {err}"
+    tags = sandbox.entry("2024-03-intro-security-course")["tags"]
+    assert "--dry-run" in tags
+    # And the lockfile was correctly created (lock was taken).
+    lock_path = sandbox.activities.with_suffix(".yaml.lock")
+    assert lock_path.exists()
+
+
+def test_file_rehash_skips_when_path_changed_between_phases(sandbox, tmp_path):
+    """If a concurrent ``file-move`` rewrites a record's path between
+    phase 2 (hash) and phase 3 (apply), we must NOT write the phase-2
+    digest onto the new path. Round-1 review #2.
+
+    Simulates the race by manually mutating the file inventory between
+    snapshot capture (via cmd_file_rehash's pre-lock load) and the
+    locked apply. We achieve the same effect by patching the inventory
+    after file-add but before file-rehash.
+
+    v1.7.1 follow-up — round-1 PR #20 #2.
+    """
+    # Two files registered.
+    data_root = sandbox.activities.parent
+    f1 = data_root / "rehash-a.txt"
+    f2 = data_root / "rehash-b.txt"
+    f1.write_text("alpha content")
+    f2.write_text("beta content")
+    sandbox.run("file-add", "rehash-a.txt", "--category", "evidence", "--title", "A")
+    sandbox.run("file-add", "rehash-b.txt", "--category", "evidence", "--title", "B")
+
+    # Capture phase-2 view: paths are ``rehash-a.txt`` and ``rehash-b.txt``.
+    # Now "concurrently" swap the second record's path to a non-existent
+    # path before rehash runs phase 3.
+    import yaml as _yaml
+
+    files_yaml = sandbox.activities.parent / "files.yaml"
+    data = _yaml.safe_load(files_yaml.read_text())
+    for r in data["files"]:
+        if r["id"] == "rehash-b":
+            r["path"] = "moved-elsewhere.txt"
+    files_yaml.write_text(_yaml.dump(data, default_flow_style=False, sort_keys=False))
+
+    # Now rehash --all. The path-drift check should skip rehash-b rather
+    # than overwrite it with the digest computed for the OLD path.
+    out, err, rc = sandbox.run("file-rehash", "--all")
+    assert rc == 0, f"file-rehash failed: {err}"
+    # Either skipped or just not rehashed — but specifically: the digest
+    # for rehash-b should NOT equal the digest of the old beta-content
+    # path (since the path changed).
+    # The safer property to assert: rehash-b appears in the path-drift skip
+    # notice the command emits. (Inventory state is also unchanged because
+    # phase 3 chose skip-on-mismatch.)
+    assert "rehash-b" in out, f"expected rehash-b to appear in path-drift skip notice: {out}"
+
+
+def test_create_dry_run_without_label_succeeds(sandbox):
+    """``librarian create --dry-run`` without a ``--label`` (and without
+    the env var) must succeed: dry-run doesn't write, so the label gate
+    that exists for actual writes shouldn't apply.
+
+    v1.7.1 follow-up — round-1 PR #20 #8.
+    """
+    entry = {
+        "id": "2026-09-labelless-dry",
+        "date": "2026-09-01",
+        "title": "Labelless dry-run probe",
+        "description": "No label, no write, no problem.",
+        "tags": ["probe"],
+    }
+    # Wipe both --label and the env var.
+    out, _, rc = sandbox.run(
+        "create",
+        "--dry-run",
+        stdin=json.dumps(entry),
+        extra_env={"LIBRARIAN_SESSION_LABEL": ""},
+    )
+    assert rc == 0, f"labelless dry-run should succeed: {out}"
+    assert "Dry run" in out

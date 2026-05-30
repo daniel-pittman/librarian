@@ -445,9 +445,11 @@ def test_scan_dangling_refs_merged_into_main_does_not_match():
 
 
 def test_scan_dangling_refs_consolidated_from_still_recognized():
-    """The legitimate historical form ``Consolidated from`` is still
-    recognized after the tightening — only the noun ``consolidation`` and
-    the ``merged into`` alternatives were dropped."""
+    """The legitimate historical forms ``Consolidated from`` / ``Consolidates
+    from`` / ``Consolidating from`` are still recognized after the
+    tightening — only the noun ``consolidation`` and the ``merged into``
+    alternatives were dropped. The ``ing`` form covers in-progress
+    consolidations the user wants to pre-record."""
     activities = [
         _entry(
             "2026-09-merged-finite",
@@ -457,10 +459,14 @@ def test_scan_dangling_refs_consolidated_from_still_recognized():
             "2026-09-merged-from",
             description="Merged from `2024-old-x` before the cleanup.",
         ),
+        _entry(
+            "2026-09-ing-finite",
+            description="Consolidating from `2024-old-y` over the next quarter.",
+        ),
     ]
-    ids = {"2026-09-merged-finite", "2026-09-merged-from"}
+    ids = {"2026-09-merged-finite", "2026-09-merged-from", "2026-09-ing-finite"}
     findings = scan_dangling_refs(activities, ids=ids, text_fields=_DESC)
-    assert findings == [], f"historical past-tense forms wrongly flagged: {findings}"
+    assert findings == [], f"historical finite forms wrongly flagged: {findings}"
 
 
 def test_scan_dangling_refs_multiline_continuation_list_handled():

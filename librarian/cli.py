@@ -112,14 +112,25 @@ def build_context(env: dict[str, str] | None = None) -> Context:
 def _is_pure_read_invocation(args: list[str]) -> bool:
     """True when ``args`` clearly won't reach a write path.
 
-    Detects ``-h`` / ``--help`` (argparse short-circuits with a clean exit
-    after printing help) and ``--dry-run`` (writer commands honor this by
-    returning 0 before any mutation). When either is present the lock can
-    be skipped: no write will happen, so a) we don't materialize the
-    ``.lock`` sidecar against a fresh install just to print help, and
-    b) we don't serialize ``--dry-run`` previews behind a concurrent writer.
+    Conservative: matches only ``librarian <cmd> -h`` / ``librarian <cmd>
+    --help`` (i.e. the help flag is the FIRST and only argument). That's
+    the canonical "show usage" call and is guaranteed to exit before any
+    write code runs.
+
+    Why not also skip on ``--dry-run`` (or ``--help`` anywhere in argv)?
+    Several writer commands (``add-tags``, ``remove-tags``, ``add-docs``,
+    ``remove-docs``, ...) take user-controlled positional values and DON'T
+    route them through argparse — a legitimate positional value can be the
+    literal string ``--dry-run`` or ``--help`` (e.g. a tag named
+    ``--dry-run``). Skipping the lock on a membership test would defeat
+    the cross-process atomicity invariant the decorator was built to
+    enforce. The cost of the narrower skip is one short lock-acquire/
+    release on writer-help invocations beyond ``<cmd> --help`` — the
+    ``.lock`` sidecar is still materialized once per fresh data home,
+    which is a one-time cosmetic cost that's nowhere near a correctness
+    regression.
     """
-    return "-h" in args or "--help" in args or "--dry-run" in args
+    return len(args) == 1 and args[0] in ("-h", "--help")
 
 
 def _activities_locked(func):
@@ -1222,13 +1233,22 @@ def cmd_create(ctx: Context, args: list[str]) -> int:
     pre-lock fuzzy scan and the locked append; the re-check inside the lock
     catches a same-id collision and aborts cleanly.
     """
-    label = _resolve_label(args, required=True)
-    if label is None:
-        return 1
+    # Don't require --label yet; a dry-run never writes and shouldn't be
+    # gated by the label requirement. We re-check after argparse below.
+    label = _resolve_label(args, required=False)
     parser = argparse.ArgumentParser(prog="librarian create")
     parser.add_argument("--json", help="entry as a JSON string")
     parser.add_argument("--dry-run", action="store_true")
     parsed = parser.parse_args(args)
+    if not parsed.dry_run and not label:
+        # Actual write — label is mandatory. Emit the same advice
+        # ``_resolve_label`` would have produced.
+        print(
+            "ERROR: write operations require --label LABEL or the "
+            "LIBRARIAN_SESSION_LABEL env var.\n"
+            "       Format: <context>:<short-purpose>, e.g. 'cli:main-curator'"
+        )
+        return 1
 
     if parsed.json:
         data = json.loads(parsed.json)
@@ -3287,32 +3307,63 @@ def cmd_file_rehash(ctx: Context, args: list[str]) -> int:
             return 1
 
     # Phase 2 — compute hashes OUTSIDE the lock. This is the expensive part.
-    hash_results: dict[str, str] = {}  # file_id -> new_sha256
+    # We store (path_snapshot, sha) per id so phase 3 can verify the record's
+    # path didn't change underneath us via a concurrent ``file-move`` — if
+    # it did, we'd be writing a digest for path P_old onto a record whose
+    # path is now P_new, silently corrupting the inventory.
+    hash_results: dict[str, tuple[str, str]] = {}  # id -> (rel_path, sha256)
     missing: list[str] = []
     for record in targets:
         rid = record.get("id")
-        abs_path = ctx.paths.root / record.get("path", "")
+        if rid is None:
+            # Malformed record with no ``id:`` — skip entirely. Pre-PR the
+            # tight per-record loop wrote sha back directly so this could
+            # corrupt one id-less record; the snapshot pattern would corrupt
+            # all of them if we keyed on ``None``.
+            continue
+        rel_path = record.get("path", "")
+        abs_path = ctx.paths.root / rel_path
         if not abs_path.exists():
             missing.append(rid)
             continue
-        hash_results[rid] = sha256_of(abs_path)
+        hash_results[rid] = (rel_path, sha256_of(abs_path))
 
     # Phase 3 — apply deltas under the lock. Re-load to absorb any concurrent
-    # writes that landed during phase 2, then patch in our hashes by id.
+    # writes that landed during phase 2, then patch in our hashes by id ONLY
+    # when the record's path still matches what phase 2 hashed.
+    skipped_path_drift: list[str] = []
     with write_lock(ctx.paths.files):
         records = load_files(ctx.paths.files)
         rehashed = 0
         for record in records:
-            new_sha = hash_results.get(record.get("id"))
-            if new_sha is not None:
-                record["sha256"] = new_sha
-                rehashed += 1
+            rid = record.get("id")
+            if rid is None:
+                continue
+            snapshot = hash_results.get(rid)
+            if snapshot is None:
+                continue
+            snap_path, new_sha = snapshot
+            if record.get("path", "") != snap_path:
+                # Concurrent ``file-move`` rewrote this id's path between
+                # phases. Skip rather than overwrite the wrong digest.
+                skipped_path_drift.append(rid)
+                continue
+            record["sha256"] = new_sha
+            rehashed += 1
         save_files(ctx.paths.files, records)
         append_ledger(ctx.paths.ledger, "file-rehash", scope, label, f"rehashed={rehashed}")
 
     print(f"Rehashed {rehashed} file(s).")
     if missing:
-        print(f"Skipped {len(missing)} missing from disk: {', '.join(missing)}")
+        # Guard the join against any unexpected non-string (defensive — the
+        # phase-2 skip already filters ``None`` rids).
+        print(f"Skipped {len(missing)} missing from disk: {', '.join(str(m) for m in missing)}")
+    if skipped_path_drift:
+        print(
+            f"Skipped {len(skipped_path_drift)} whose path changed during "
+            f"hashing (rerun to pick them up): "
+            f"{', '.join(str(m) for m in skipped_path_drift)}"
+        )
     return 0
 
 
