@@ -34,14 +34,15 @@ install it with `pre-commit install` if `setup-dev.sh` did not.
 - **No personal data.** This is a public, open-source repository: examples,
   fixtures and docs use only fictional, generic content.
 
-## Claude-driven review workflows
+## Code review and security workflows
 
-This repository runs three Claude-driven workflows on contributor activity:
+This repository runs these review workflows on contributor activity:
 
-- **Code review** — every PR gets an automatic review comment from Claude.
-- **Security review** — PRs targeting `main` or `develop` also get a deeper,
-  security-focused review.
-- **`@claude` bot** — collaborators can mention `@claude` in an issue or PR
+- **Code review**: every PR gets an automatic review comment from Claude.
+- **Security scan (Semgrep)**: a free, token-free Semgrep OSS scan runs first
+  on every PR and posts its findings as a single sticky comment, which the code
+  review folds into its analysis. No API key required.
+- **`@claude` bot**: collaborators can mention `@claude` in an issue or PR
   comment to ask questions, request changes, or have it summarize. Only
   authors with collaborator access can drive it.
 
