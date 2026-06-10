@@ -1,0 +1,25 @@
+# Dependabot: weekly dependency-update PRs, grouped to reduce PR noise.
+#
+#   * github-actions: keeps the SHA-pinned actions in .github/workflows/ current
+#     (Dependabot bumps the SHA and updates the version comment).
+#   * pip: the Python dependencies declared in pyproject.toml.
+#
+# Treat Dependabot PRs like any other: let CI run, review the bump, merge if green.
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      minor-patch:
+        update-types: ["minor", "patch"]
