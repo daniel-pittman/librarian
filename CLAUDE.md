@@ -9,6 +9,23 @@ itself. For *using* the tool, see `README.md`.
 over a YAML database of "activity entries". Each entry has fixed core fields
 plus optional structured "blocks" defined by a **pluggable schema**.
 
+## Automated Review Policy
+
+The PR review workflow enforces two rules the automated reviewer applies on every
+pull request:
+
+- **Tests ship with code.** If a PR changes application or library source code in a
+  way that warrants tests (new or changed behavior, bug fixes, new branches or edge
+  cases) and does not add or update corresponding tests, the reviewer flags it as a
+  HIGH-severity finding. Docs-only, README, comments, formatting, and pure-configuration
+  changes (CI YAML, lockfile bumps, asset-only, version bumps) are exempt.
+- **Security findings inform the review.** A free, token-free Semgrep (OSS) scan runs
+  before the Claude review and posts its findings as a single sticky PR comment, which
+  the reviewer folds into its analysis. Semgrep scans with the `p/python`, `p/bash`,
+  `p/secrets`, and `p/ci` rule packs for source, shell, committed-secret, and CI-misconfig
+  detection. `ruff` remains the Python linter. This replaces the metered Claude
+  security-review job.
+
 ## Architecture
 
 ```
