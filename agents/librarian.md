@@ -135,8 +135,9 @@ REF`).
 
 ## Command surface
 
-- **Read:** `search`, `get`, `filter`, `list`, `stats`, `tags`, `tag-audit`,
-  `validate`, `export`, `project`, `similar`, `contact`, `changes`, `schema`
+- **Read:** `search`, `get`, `filter`, `list`, `stats`, `rollup`, `tags`,
+  `tag-audit`, `validate`, `export`, `project`, `similar`, `contact`, `changes`,
+  `schema`
 - **Write:** `create`, `update-field`, `update-description`, `update-notes`,
   `update-nested-field`, `add-tags`, `remove-tags`, `add-docs`, `remove-docs`,
   `delete`, `rename-id`
