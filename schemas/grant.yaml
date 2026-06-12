@@ -1,0 +1,55 @@
+# =============================================================================
+# Schema: Grant / Funding
+# =============================================================================
+# Track grant and funding awards. This is written generically so it suits ANY
+# funded portfolio — research grants, fellowships, internal seed awards,
+# contracts, and so on. No funder, institution, or person is hardcoded;
+# `role`, `status`, and `sponsor` are generic enums or free text you adapt to
+# your portfolio's conventions.
+#
+# To activate: copy this file to <data-home>/schema.yaml (or set
+# LIBRARIAN_SCHEMA_PATH). To track funding ALONGSIDE another concern (e.g. a
+# post-tenure-review or continuing-education block), merge the `grant` block
+# below into that schema file under a single `blocks:` mapping.
+# -----------------------------------------------------------------------------
+
+name: Grant / Funding
+description: >-
+  Track grant and funding awards — amount, the award holder's role, lifecycle
+  status, and the sponsoring funder.
+
+blocks:
+  # The "grant" block. An entry that carries it records a funding award.
+  grant:
+    label: Grant / Funding
+    fields:
+      # The award amount in whole currency units (e.g. whole US dollars).
+      # Stored as an integer; `stats` and `rollup` sum it. Whole units only:
+      # `type: int` rejects a fractional amount at validation time (it does not
+      # round), so funding portfolios record whole dollars.
+      - name: amount
+        type: int
+
+      # The award holder's role on the grant.
+      - name: role
+        type: enum
+        values: [pi, co-pi, co-i, senior-personnel, consultant, collaborator]
+
+      # The award's lifecycle state (required).
+      - name: status
+        type: enum
+        required: true
+        values: [awarded, pending, not-funded]
+
+      # The funding body (free text — e.g. a federal agency, a foundation, an
+      # internal office).
+      - name: sponsor
+        type: string
+
+      # The funder's award/grant number (optional, free text).
+      - name: award_number
+        type: string
+
+      # Free-text notes about the award.
+      - name: notes
+        type: text

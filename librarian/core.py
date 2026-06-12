@@ -132,6 +132,100 @@ def filter_entries(
     return results
 
 
+def _intish(raw: object) -> int:
+    """Coerce a block-field value to an int for summing, or ``0`` if it is not
+    numeric.
+
+    Follows the same int-coercion as ``cmd_stats``: a real ``int`` counts as
+    itself, an all-digit string (with an optional leading ``-``) is parsed, and
+    anything else (missing, ``None``, free text) contributes ``0``. It
+    ADDITIONALLY treats ``bool`` as non-numeric (``cmd_stats`` does not), so a
+    ``True``/``False`` field contributes ``0`` rather than ``1``/``0``.
+    """
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str) and raw.strip().lstrip("-").isdigit():
+        return int(raw)
+    return 0
+
+
+def rollup_entries(
+    entries: list[dict],
+    block: str,
+    *,
+    sum_field: str | None = None,
+    group_by: str | None = None,
+) -> dict:
+    """Aggregate the entries that carry ``block`` into counts and totals.
+
+    Schema-agnostic and pure (no I/O): the caller supplies the entry list and
+    the block/field names; this function does the arithmetic. The intended
+    consumer is a totals view (e.g. "sum ``grant.amount`` grouped by
+    ``status``") that wants a machine-readable rollup rather than a printed
+    table.
+
+    Args:
+        entries: Candidate entries (typically the output of
+            :func:`filter_entries`). Only those carrying ``block`` are counted.
+        block: The block name to roll up (e.g. ``"grant"``).
+        sum_field: A block field to total. The same int-coercion used by
+            ``stats`` applies: a real ``int`` or an all-digit string (with an
+            optional leading ``-``) contributes its value, anything else
+            contributes ``0``. A non-numeric or missing field does not drop the
+            entry from the count. ``None`` to skip summing.
+        group_by: A block field to break the rollup down by. Each distinct
+            ``str(value)`` becomes a group; entries where the field is missing
+            or ``None`` land in the ``"(unset)"`` group. ``None`` to skip
+            grouping.
+
+    Returns:
+        A dict::
+
+            {
+                "block": <block>,
+                "count": <int>,                 # entries carrying the block
+                "sum": <int> | None,            # total of sum_field, or None
+                "sum_field": <sum_field>,
+                "groups": <dict> | None,        # per-group breakdown, or None
+                "group_by": <group_by>,
+            }
+
+        When ``group_by`` is given, ``groups`` maps each
+        ``str(group_value)`` (or ``"(unset)"``) to ``{"count": int, "sum":
+        int | None}``; the per-group ``sum`` is present only when ``sum_field``
+        is also given.
+    """
+    with_block = [e for e in entries if block in e]
+    count = len(with_block)
+
+    total: int | None = None
+    if sum_field is not None:
+        total = sum(_intish((e.get(block) or {}).get(sum_field)) for e in with_block)
+
+    groups: dict | None = None
+    if group_by is not None:
+        groups = {}
+        for entry in with_block:
+            data = entry.get(block) or {}
+            val = data.get(group_by)
+            key = "(unset)" if val is None else str(val)
+            bucket = groups.setdefault(
+                key, {"count": 0, "sum": 0 if sum_field is not None else None}
+            )
+            bucket["count"] += 1
+            if sum_field is not None:
+                bucket["sum"] += _intish(data.get(sum_field))
+
+    return {
+        "block": block,
+        "count": count,
+        "sum": total,
+        "sum_field": sum_field,
+        "groups": groups,
+        "group_by": group_by,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Fuzzy similarity
 # ---------------------------------------------------------------------------

@@ -74,6 +74,7 @@ and why.
 | `validate` | hardcoded `_PTR_SUBCATEGORIES` | runs `validate_block` for every schema block on every entry | schema-driven |
 | dangling-ref scan | scanned `description`, `ptr.notes`, `cpe.notes` | scans `description` + every text/string field the schema declares | schema-driven |
 | new `schema` command | — | added; describes the active schema (`--json` too) | discoverability |
+| new `rollup` command | — | added; `rollup BLOCK [--sum FIELD] [--group-by FIELD] [--json]` aggregates a block over a filtered set (count + summed int field + per-group breakdown) | schema-agnostic aggregation primitive (the totals view a funding portfolio needs) |
 | MCP `update_ptr_field` / `update_cpe_field` | two block-specific tools | one `librarian_update_block_field(block, field, ...)` | schema-agnostic |
 | ID-shape heuristic (dangling refs) | matched corpus-specific prefixes (`c3lab-`, `ongoing-`, `rejected-`, year) | matches any valid slug that contains a digit | the prefix list was personal data |
 | contact rolodex | mentioned a specific canonical roster entry | generic `Name (email)` extraction, no special entry | personal data removed |
@@ -101,7 +102,7 @@ it only computes paths — which makes the resolution logic trivially unit-teste
 
 The tool runs **schema-less by default**. On first use it creates the data home
 and an empty `activities.yaml`; no `schema.yaml` is written. The user opts into
-a schema by copying one of the four files from `schemas/` into the data home as
+a schema by copying one of the five files from `schemas/` into the data home as
 `schema.yaml` (or pointing `LIBRARIAN_SCHEMA_PATH` at one).
 
 Rationale: silently copying a *post-tenure-review* schema into a new user's data

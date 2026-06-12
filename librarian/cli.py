@@ -41,6 +41,7 @@ from .core import (
     canonical_name,
     extract_contacts,
     filter_entries,
+    rollup_entries,
     scan_dangling_refs,
     similarity_score,
     tag_kernel,
@@ -559,6 +560,105 @@ def cmd_stats(ctx: Context, args: list[str]) -> int:
 
     with_docs = sum(1 for e in activities if e.get("docs"))
     print(f"\nEntries with documentation: {with_docs}")
+    return 0
+
+
+def cmd_rollup(ctx: Context, args: list[str]) -> int:
+    """Aggregate one block's entries into counts and totals.
+
+    ``rollup BLOCK [--sum FIELD] [--group-by FIELD] [--json] [filters...]``
+
+    Rolls up every entry carrying ``BLOCK`` (after the same filtering flags
+    ``filter`` exposes: ``--block-field``, ``--tag``, ``--after``,
+    ``--before``, ``--during``, ``--year``). ``--sum FIELD`` totals an integer
+    block field (e.g. ``rollup grant --sum amount``); ``--group-by FIELD``
+    breaks the rollup down by a block field (e.g. ``--group-by status``).
+    ``--json`` prints the machine-readable rollup dict for downstream tooling
+    (e.g. a portfolio view generator). Example::
+
+        librarian rollup grant --sum amount --group-by status
+    """
+    parser = argparse.ArgumentParser(prog="librarian rollup")
+    parser.add_argument("block", help="the block name to roll up (e.g. grant)")
+    parser.add_argument("--sum", dest="sum_field", metavar="FIELD", help="int field to total")
+    parser.add_argument("--group-by", dest="group_by", metavar="FIELD", help="field to group by")
+    parser.add_argument(
+        "--json", dest="as_json", action="store_true", help="machine-readable output"
+    )
+    # Mirror cmd_filter's set-scoping flags so a rollup can be narrowed.
+    parser.add_argument("--block-field", nargs=2, metavar=("BLOCK.FIELD", "VALUE"))
+    parser.add_argument("--after", help="entries starting after this date")
+    parser.add_argument("--before", help="entries starting before this date")
+    parser.add_argument("--during", help="entries active during a range")
+    parser.add_argument("--year", help="entries active during a year")
+    parser.add_argument("--tag", action="append", dest="tags", help="tag (repeatable)")
+    parsed = parser.parse_args(args)
+
+    block = parsed.block
+
+    # If a schema is active, warn (but don't fail) on an unknown block, and
+    # hard-fail when --sum names a non-int field of a known block.
+    block_def = ctx.schema.block(block) if not ctx.schema.is_empty else None
+    if not ctx.schema.is_empty and block_def is None:
+        print(f"WARNING: block '{block}' is not in the active schema; rolling up anyway.")
+    if parsed.sum_field and block_def is not None:
+        field_def = block_def.field(parsed.sum_field)
+        if field_def is not None and field_def.type != "int":
+            print(
+                f"ERROR: --sum field '{parsed.sum_field}' is type '{field_def.type}', "
+                f"not int — only int fields can be summed."
+            )
+            return 1
+    # Soft check: when --group-by names a field the schema doesn't declare on a
+    # known block, the rollup buckets every entry under "(unset)". Warn (don't
+    # fail — generic mode and undeclared fields must still work).
+    if parsed.group_by and block_def is not None and block_def.field(parsed.group_by) is None:
+        print(
+            f"WARNING: --group-by field '{parsed.group_by}' is not declared on block "
+            f"'{block}'; the rollup will bucket everything under '(unset)'."
+        )
+
+    during_start, during_end = _during_window(parsed.year, parsed.during)
+
+    block_field = None
+    if parsed.block_field:
+        path, value = parsed.block_field
+        if "." not in path:
+            print("ERROR: --block-field path must be BLOCK.FIELD")
+            return 1
+        bf_block, bf_field = path.split(".", 1)
+        block_field = (bf_block, bf_field, value)
+
+    _, activities = load_activities(ctx.paths.activities)
+    filtered = filter_entries(
+        activities,
+        after=parsed.after,
+        before=parsed.before,
+        during_start=during_start,
+        during_end=during_end,
+        tags=parsed.tags,
+        has_block=(block, True),
+        block_field=block_field,
+    )
+
+    result = rollup_entries(filtered, block, sum_field=parsed.sum_field, group_by=parsed.group_by)
+
+    if parsed.as_json:
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+
+    print(f"Rollup of block '{block}' ({len(filtered)} entries match the filter):\n")
+    print(f"  count: {result['count']}")
+    if parsed.sum_field:
+        print(f"  sum({parsed.sum_field}): {result['sum']:,}")
+    if parsed.group_by:
+        print(f"\n  by {parsed.group_by}:")
+        groups = result["groups"] or {}
+        for key, stats in sorted(groups.items(), key=lambda kv: -kv[1]["count"]):
+            line = f"    {key:24s} count={stats['count']}"
+            if parsed.sum_field:
+                line += f"  sum={stats['sum']:,}"
+            print(line)
     return 0
 
 
@@ -3861,6 +3961,7 @@ COMMANDS = {
     "filter": cmd_filter,
     "list": cmd_list,
     "stats": cmd_stats,
+    "rollup": cmd_rollup,
     "tags": cmd_tags,
     "tag-audit": cmd_tag_audit,
     "validate": cmd_validate,

@@ -16,6 +16,67 @@ from librarian.schema import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
+# The shipped reusable schema templates live in <repo>/schemas/.
+SCHEMAS_DIR = Path(__file__).parent.parent / "schemas"
+
+
+# ---------------------------------------------------------------------------
+# Shipped grant schema template (schemas/grant.yaml)
+# ---------------------------------------------------------------------------
+
+
+def test_grant_schema_template_parses():
+    """The shipped grant template parses into a single grant block."""
+    schema = load_schema(SCHEMAS_DIR / "grant.yaml")
+    assert not schema.is_empty
+    assert {b.name for b in schema.blocks} == {"grant"}
+    grant = schema.block("grant")
+    assert [f.name for f in grant.fields] == [
+        "amount",
+        "role",
+        "status",
+        "sponsor",
+        "award_number",
+        "notes",
+    ]
+    # amount is summable (int); status is the required enum.
+    assert grant.field("amount").type == "int"
+    assert grant.field("status").required is True
+
+
+def test_grant_block_valid_passes_validation():
+    """A well-formed grant block (fictional data) validates clean."""
+    grant = load_schema(SCHEMAS_DIR / "grant.yaml").block("grant")
+    block_data = {
+        "amount": 500000,
+        "role": "pi",
+        "status": "awarded",
+        "sponsor": "National Science Org",
+        "award_number": "NSO-0000001",
+        "notes": "Awarded to Dr. Jane Roe at Acme University.",
+    }
+    assert validate_block(grant, block_data) == []
+
+
+def test_grant_block_rejects_bad_status():
+    """An out-of-enum status value is flagged."""
+    grant = load_schema(SCHEMAS_DIR / "grant.yaml").block("grant")
+    issues = validate_block(grant, {"status": "maybe"})
+    assert any("GRANT.STATUS" in i for i in issues)
+
+
+def test_grant_block_rejects_non_int_amount():
+    """A non-integer amount is flagged as not an integer."""
+    grant = load_schema(SCHEMAS_DIR / "grant.yaml").block("grant")
+    issues = validate_block(grant, {"status": "awarded", "amount": "lots"})
+    assert any("GRANT.AMOUNT" in i and "integer" in i for i in issues)
+
+
+def test_grant_block_flags_missing_required_status():
+    """A grant block with no status (the only required field) is flagged."""
+    grant = load_schema(SCHEMAS_DIR / "grant.yaml").block("grant")
+    issues = validate_block(grant, {"amount": 1000, "role": "pi"})
+    assert any("MISSING GRANT.STATUS" in i for i in issues)
 
 
 # ---------------------------------------------------------------------------
