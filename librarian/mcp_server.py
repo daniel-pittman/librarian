@@ -303,6 +303,50 @@ def librarian_stats() -> str:
 
 
 @mcp.tool()
+def librarian_rollup(
+    block: str,
+    sum_field: str | None = None,
+    group_by: str | None = None,
+    block_field: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
+    year: str | None = None,
+    during: str | None = None,
+    tag: str | None = None,
+) -> str:
+    """Aggregate one block's entries into counts and totals (machine-readable).
+
+    Rolls up every entry carrying `block`, optionally summing an integer field
+    and/or grouping by a field. Use this for portfolio totals — e.g.
+    `block="grant", sum_field="amount", group_by="status"` answers "how much
+    funding is awarded vs. pending?".
+
+    `block_field` is `BLOCK.FIELD=VALUE` (e.g. `grant.role=pi`) and, with
+    `tag` / `after` / `before` / `year` / `during`, scopes the set that is
+    rolled up. Returns the JSON rollup dict (count, sum, per-group breakdown).
+    """
+    args = ["rollup", block, "--json"]
+    if sum_field:
+        args += ["--sum", sum_field]
+    if group_by:
+        args += ["--group-by", group_by]
+    if block_field and "=" in block_field:
+        path, value = block_field.split("=", 1)
+        args += ["--block-field", path, value]
+    if after:
+        args += ["--after", after]
+    if before:
+        args += ["--before", before]
+    if year:
+        args += ["--year", year]
+    if during:
+        args += ["--during", during]
+    if tag:
+        args += ["--tag", tag]
+    return _out(_run_cli(args))
+
+
+@mcp.tool()
 def librarian_tags() -> str:
     """List every tag in use, with frequency counts."""
     return _out(_run_cli(["tags"]))

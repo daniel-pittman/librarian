@@ -35,10 +35,11 @@ librarian/
   schema.py        the pluggable schema engine (parse + validate + coerce)
   storage.py       low-level YAML I/O: line-level editing, fcntl locks, ledger
   files.py         the artifact-file inventory (files.yaml)
-  core.py          schema-agnostic analysis: filtering, similarity, scanners
+  core.py          schema-agnostic analysis: filtering, aggregation (rollup),
+                   similarity, scanners
   cli.py           argparse command dispatch — the `librarian` entry point
   mcp_server.py    FastMCP server wrapping the CLI; self-bootstraps .venv
-schemas/           four bundled example schemas
+schemas/           five bundled example schemas
 agents/            a generic AI-agent definition template
 tests/             pytest suite + synthetic fixture corpus
 ```
@@ -59,9 +60,9 @@ scalars, so it *is* safe to load/mutate/dump in full (`files.save_files`).
 
 The schema is *data*, loaded from `schema.yaml` by `schema.load_schema`. Blocks,
 fields, types and enums are all declarative. Nothing about any particular
-block (`ptr`, `cpe`, ...) is hardcoded — `validate`, `stats`, `filter` and
-`update-nested-field` all consult the loaded `Schema`. With no schema file the
-tool runs in generic mode and blocks are simply not validated.
+block (`ptr`, `cpe`, ...) is hardcoded — `validate`, `stats`, `filter`,
+`rollup` and `update-nested-field` all consult the loaded `Schema`. With no
+schema file the tool runs in generic mode and blocks are simply not validated.
 
 ## Running tests and lint
 

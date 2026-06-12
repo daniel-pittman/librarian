@@ -138,6 +138,149 @@ def test_stats(sandbox):
     assert "total credits: 46" in out
 
 
+# ---------------------------------------------------------------------------
+# rollup
+# ---------------------------------------------------------------------------
+
+# A small grant schema + corpus written into the sandbox for the rollup tests.
+# Fictional data only: Dr. Jane Roe at Acme University, National Science Org.
+_GRANT_SCHEMA = """\
+name: Grant test schema
+description: Grant rollup fixture.
+blocks:
+  grant:
+    label: Grant / Funding
+    fields:
+      - name: amount
+        type: int
+      - name: role
+        type: enum
+        values: [pi, co-pi, co-i, senior-personnel, consultant, collaborator]
+      - name: status
+        type: enum
+        required: true
+        values: [awarded, pending, not-funded]
+      - name: sponsor
+        type: string
+"""
+
+_GRANT_ACTIVITIES = """\
+activities:
+  - id: 2025-01-grant-pi
+    date: 2025-01-15
+    title: Funded study
+    description: A funded study.
+    tags: [grant, research]
+    docs: []
+    grant:
+      amount: 500000
+      role: pi
+      status: awarded
+      sponsor: National Science Org
+  - id: 2025-02-grant-copi
+    date: 2025-02-20
+    title: Pending proposal
+    description: A pending proposal.
+    tags: [grant]
+    docs: []
+    grant:
+      amount: "250000"
+      role: co-pi
+      status: pending
+      sponsor: Acme University
+  - id: 2025-03-grant-seed
+    date: 2025-03-10
+    title: Internal seed award
+    description: Seed funding.
+    tags: [grant, research]
+    docs: []
+    grant:
+      amount: 10000
+      role: pi
+      status: awarded
+      sponsor: Acme University
+  - id: 2025-04-plain
+    date: 2025-04-01
+    title: Not a grant
+    description: A non-grant entry.
+    tags: []
+    docs: []
+"""
+
+
+def _grant_sandbox(sandbox):
+    """Replace the sandbox schema + activities with the grant corpus."""
+    sandbox.schema.write_text(_GRANT_SCHEMA)
+    sandbox.activities.write_text(_GRANT_ACTIVITIES)
+    return sandbox
+
+
+def test_rollup_sum(sandbox):
+    """rollup --sum totals an int block field across grant entries."""
+    sandbox = _grant_sandbox(sandbox)
+    out, _, rc = sandbox.run("rollup", "grant", "--sum", "amount")
+    assert rc == 0
+    assert "count: 3" in out
+    assert "sum(amount): 760,000" in out
+
+
+def test_rollup_group_by(sandbox):
+    """rollup --group-by breaks the rollup down with per-group sums."""
+    sandbox = _grant_sandbox(sandbox)
+    out, _, rc = sandbox.run("rollup", "grant", "--sum", "amount", "--group-by", "status")
+    assert rc == 0
+    assert "by status:" in out
+    assert "awarded" in out
+    assert "pending" in out
+
+
+def test_rollup_json(sandbox):
+    """rollup --json emits the machine-readable rollup_entries dict."""
+    sandbox = _grant_sandbox(sandbox)
+    out, _, rc = sandbox.run("rollup", "grant", "--sum", "amount", "--group-by", "status", "--json")
+    assert rc == 0
+    data = json.loads(out)
+    assert data["block"] == "grant"
+    assert data["count"] == 3
+    assert data["sum"] == 760000
+    assert data["groups"]["awarded"] == {"count": 2, "sum": 510000}
+    assert data["groups"]["pending"] == {"count": 1, "sum": 250000}
+
+
+def test_rollup_filtered_by_tag_and_block_field(sandbox):
+    """rollup honours --tag and --block-field scoping before aggregating."""
+    sandbox = _grant_sandbox(sandbox)
+    out, _, rc = sandbox.run(
+        "rollup", "grant", "--sum", "amount", "--block-field", "grant.status", "awarded", "--json"
+    )
+    assert rc == 0
+    data = json.loads(out)
+    # Only the two awarded grants (510000) survive the block-field filter.
+    assert data["count"] == 2
+    assert data["sum"] == 510000
+
+    out, _, rc = sandbox.run("rollup", "grant", "--tag", "research", "--json")
+    assert rc == 0
+    assert json.loads(out)["count"] == 2
+
+
+def test_rollup_non_int_sum_field_errors(sandbox):
+    """rollup --sum on a non-int schema field fails with a friendly error."""
+    sandbox = _grant_sandbox(sandbox)
+    out, _, rc = sandbox.run("rollup", "grant", "--sum", "sponsor")
+    assert rc == 1
+    assert "not int" in out
+
+
+def test_rollup_unknown_block_warns_but_runs(sandbox):
+    """rollup on a block absent from the schema warns but still runs."""
+    sandbox = _grant_sandbox(sandbox)
+    out, _, rc = sandbox.run("rollup", "nosuchblock")
+    assert rc == 0
+    assert "WARNING" in out
+    assert "count: 0" in out
+
+
 def test_tags(sandbox):
     """tags lists every tag with a count."""
     out, _, rc = sandbox.run("tags")
