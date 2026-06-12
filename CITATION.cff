@@ -1,0 +1,52 @@
+cff-version: 1.2.0
+message: "If you use librarian in your research or workflow, please cite it using the metadata below."
+type: software
+title: "librarian: A Local-First, Plain-Text Activity Tracker with Pluggable Schemas and an MCP Server"
+abstract: >
+  librarian is a CRUD and search tool over a YAML database of activity entries.
+  Each entry has fixed core fields (id, date, title, description, tags,
+  supporting docs) plus optional structured blocks defined by a pluggable
+  schema. It ships as a command-line tool, an MCP server enabling AI
+  assistants to read and update the database, and ready-made schemas for
+  common reporting workflows (post-tenure review, continuing-education
+  credits, scholarly portfolios). The goal is to turn periodic reporting
+  cycles (annual reviews, post-tenure review, certification renewal,
+  retrospective documentation) into a query against a maintained record
+  instead of a memory exercise.
+authors:
+  - given-names: Daniel
+    family-names: Pittman
+    email: dpittma8@msudenver.edu
+    affiliation: "Metropolitan State University of Denver, Department of Computer Sciences"
+    orcid: "https://orcid.org/0000-0002-0888-3587"
+version: 1.7.3
+date-released: 2026-06-12
+license: MIT
+repository-code: "https://github.com/daniel-pittman/librarian"
+url: "https://github.com/daniel-pittman/librarian"
+keywords:
+  - activity tracking
+  - YAML
+  - command-line interface
+  - MCP server
+  - Model Context Protocol
+  - performance review
+  - post-tenure review
+  - continuing education credits
+  - scholarly portfolio
+  - research software
+  - open-source
+identifiers:
+  - type: url
+    value: "https://github.com/daniel-pittman/librarian"
+    description: "librarian source repository"
+preferred-citation:
+  type: software
+  title: "librarian: A Local-First, Plain-Text Activity Tracker with Pluggable Schemas and an MCP Server"
+  authors:
+    - given-names: Daniel
+      family-names: Pittman
+      orcid: "https://orcid.org/0000-0002-0888-3587"
+  year: 2026
+  version: 1.7.3
+  url: "https://github.com/daniel-pittman/librarian"

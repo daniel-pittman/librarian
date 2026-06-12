@@ -541,7 +541,10 @@ def test_env_memory_dir_unset(sandbox):
 
 
 def test_version(sandbox):
-    """The --version flag prints the version string."""
+    """The --version flag prints the version string from the VERSION file."""
+    from pathlib import Path
+
+    expected = (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip()
     out, _, rc = sandbox.run("--version")
     assert rc == 0
-    assert out.strip() == "1.7.2"
+    assert out.strip() == expected
