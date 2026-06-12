@@ -37,6 +37,7 @@ import yaml
 
 from . import __version__
 from .core import (
+    _intish,
     best_similarity,
     canonical_name,
     extract_contacts,
@@ -539,10 +540,7 @@ def cmd_stats(ctx: Context, args: list[str]) -> int:
             total = 0
             for entry in with_block:
                 raw = (entry.get(block.name) or {}).get(field.name)
-                if isinstance(raw, int):
-                    total += raw
-                elif isinstance(raw, str) and raw.strip().lstrip("-").isdigit():
-                    total += int(raw)
+                total += _intish(raw)
             print(f"  total {field.name}: {total}")
         print()
 
@@ -609,6 +607,14 @@ def cmd_rollup(ctx: Context, args: list[str]) -> int:
                 f"not int — only int fields can be summed."
             )
             return 1
+        # Soft check: a --sum field the schema doesn't declare on a known block
+        # is likely a typo (e.g. `--sum amountt`); it silently totals to 0. Warn
+        # (don't fail — generic mode and undeclared fields must still work).
+        if field_def is None:
+            print(
+                f"WARNING: --sum field '{parsed.sum_field}' is not declared on block "
+                f"'{block}'; the rollup will total it as 0."
+            )
     # Soft check: when --group-by names a field the schema doesn't declare on a
     # known block, the rollup buckets every entry under "(unset)". Warn (don't
     # fail — generic mode and undeclared fields must still work).

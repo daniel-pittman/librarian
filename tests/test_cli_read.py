@@ -138,6 +138,55 @@ def test_stats(sandbox):
     assert "total credits: 46" in out
 
 
+# A minimal schema + corpus exercising the bool-as-int edge in the stats int
+# summation. Fictional data only.
+_BOOL_INT_SCHEMA = """\
+name: Bool int test schema
+description: Stats int-coercion fixture.
+blocks:
+  grant:
+    label: Grant / Funding
+    fields:
+      - name: amount
+        type: int
+"""
+
+_BOOL_INT_ACTIVITIES = """\
+activities:
+  - id: 2025-01-real-amount
+    date: '2025-01-15'
+    title: Real amount
+    description: A real int amount.
+    tags: []
+    docs: []
+    grant:
+      amount: 5
+  - id: 2025-02-bool-amount
+    date: '2025-02-15'
+    title: Bool amount
+    description: A bool-valued int field.
+    tags: []
+    docs: []
+    grant:
+      amount: true
+"""
+
+
+def test_stats_int_total_excludes_bool(sandbox):
+    """A bool-valued int field contributes 0 to a stats total, not 1.
+
+    cmd_stats now sums int block fields through core._intish, which excludes
+    ``bool`` — so ``amount: true`` adds 0, leaving the total at the single real
+    ``amount: 5``. (The old inline ``isinstance(raw, int)`` path counted the
+    bool as 1, giving 6.)
+    """
+    sandbox.schema.write_text(_BOOL_INT_SCHEMA)
+    sandbox.activities.write_text(_BOOL_INT_ACTIVITIES)
+    out, _, rc = sandbox.run("stats")
+    assert rc == 0
+    assert "total amount: 5" in out
+
+
 # ---------------------------------------------------------------------------
 # rollup
 # ---------------------------------------------------------------------------
@@ -319,6 +368,19 @@ def test_rollup_unknown_group_by_field_warns(sandbox):
     assert rc == 0
     assert "WARNING" in out
     assert "(unset)" in out
+
+
+def test_rollup_unknown_sum_field_warns(sandbox):
+    """rollup --sum on a field absent from a known block warns but still runs.
+
+    A typo like ``--sum amountt`` is not a non-int field (so it isn't a hard
+    error) but silently totals to 0; the warning surfaces that instead.
+    """
+    sandbox = _grant_sandbox(sandbox)
+    out, _, rc = sandbox.run("rollup", "grant", "--sum", "amountt")
+    assert rc == 0
+    assert "WARNING" in out
+    assert "sum(amountt): 0" in out
 
 
 def test_tags(sandbox):

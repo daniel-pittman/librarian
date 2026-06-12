@@ -276,14 +276,27 @@ def test_rollup_tool_minimal_args(monkeypatch):
 
 
 def test_rollup_tool_rejects_malformed_block_field():
-    """A provided-but-malformed block_field (no '=') raises rather than dropping.
+    """A provided-but-malformed block_field (no '=') returns an ERROR string.
 
     A truthy block_field that lacks the ``=`` separator can't be split into
     BLOCK.FIELD and VALUE; silently ignoring it would scope nothing and mislead
-    the caller. A falsy block_field still means 'no filter' (covered elsewhere).
+    the caller. The wrapper surfaces a clear ``ERROR:`` string (consistent with
+    how the other read tools report failures via ``_out``) rather than raising.
+    A falsy block_field still means 'no filter' (covered elsewhere).
     """
-    with pytest.raises(ValueError, match="BLOCK.FIELD=VALUE"):
-        mcp_server.librarian_rollup(block="grant", block_field="grant.role")
+    result = mcp_server.librarian_rollup(block="grant", block_field="grant.role")
+    assert result == "ERROR: block_field must be in BLOCK.FIELD=VALUE form"
+
+
+def test_filter_tool_rejects_malformed_block_field():
+    """librarian_filter mirrors librarian_rollup: a malformed block_field errors.
+
+    A truthy block_field without ``=`` previously dropped silently; it now
+    returns the SAME ERROR string the rollup wrapper does, so the two tools
+    behave identically. A falsy block_field still means 'no filter'.
+    """
+    result = mcp_server.librarian_filter(block_field="grant.role")
+    assert result == "ERROR: block_field must be in BLOCK.FIELD=VALUE form"
 
 
 def test_out_does_not_double_error_prefix():

@@ -274,7 +274,9 @@ def librarian_filter(
     args = ["filter"]
     if category:
         args += ["--category", category]
-    if block_field and "=" in block_field:
+    if block_field:
+        if "=" not in block_field:
+            return "ERROR: block_field must be in BLOCK.FIELD=VALUE form"
         path, value = block_field.split("=", 1)
         args += ["--block-field", path, value]
     if after:
@@ -332,7 +334,7 @@ def librarian_rollup(
         args += ["--group-by", group_by]
     if block_field:
         if "=" not in block_field:
-            raise ValueError("block_field must be in BLOCK.FIELD=VALUE form")
+            return "ERROR: block_field must be in BLOCK.FIELD=VALUE form"
         path, value = block_field.split("=", 1)
         args += ["--block-field", path, value]
     if after:
