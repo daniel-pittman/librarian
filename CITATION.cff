@@ -19,8 +19,8 @@ authors:
     email: dpittma8@msudenver.edu
     affiliation: "Metropolitan State University of Denver, Department of Computer Sciences"
     orcid: "https://orcid.org/0000-0002-0888-3587"
-version: 1.7.2
-date-released: 2026-06-11
+version: 1.7.3
+date-released: 2026-06-12
 license: MIT
 repository-code: "https://github.com/daniel-pittman/librarian"
 url: "https://github.com/daniel-pittman/librarian"
