@@ -217,6 +217,75 @@ def test_env_tool_translates_to_cli(monkeypatch):
     assert "librarian environment" in result
 
 
+def test_rollup_tool_translates_to_cli(monkeypatch):
+    """librarian_rollup forwards block, --sum, --group-by, filters, and --json.
+
+    Project invariant: every new command exists on both the CLI and the MCP
+    server with matching behavior. A read tool needs no session label.
+    """
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        captured["env"] = kw.get("extra_env")
+        return {
+            "ok": True,
+            "stdout": '{"block": "grant", "count": 2, "sum": 510000}\n',
+            "stderr": "",
+            "exit_code": 0,
+        }
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    result = mcp_server.librarian_rollup(
+        block="grant",
+        sum_field="amount",
+        group_by="status",
+        block_field="grant.role=pi",
+        tag="research",
+    )
+    assert captured["args"] == [
+        "rollup",
+        "grant",
+        "--json",
+        "--sum",
+        "amount",
+        "--group-by",
+        "status",
+        "--block-field",
+        "grant.role",
+        "pi",
+        "--tag",
+        "research",
+    ]
+    # Read tools carry no session label.
+    assert captured["env"] is None
+    assert '"sum": 510000' in result
+
+
+def test_rollup_tool_minimal_args(monkeypatch):
+    """A bare rollup (just the block) still passes --json and nothing else."""
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        return {"ok": True, "stdout": "{}\n", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    mcp_server.librarian_rollup(block="grant")
+    assert captured["args"] == ["rollup", "grant", "--json"]
+
+
+def test_rollup_tool_rejects_malformed_block_field():
+    """A provided-but-malformed block_field (no '=') raises rather than dropping.
+
+    A truthy block_field that lacks the ``=`` separator can't be split into
+    BLOCK.FIELD and VALUE; silently ignoring it would scope nothing and mislead
+    the caller. A falsy block_field still means 'no filter' (covered elsewhere).
+    """
+    with pytest.raises(ValueError, match="BLOCK.FIELD=VALUE"):
+        mcp_server.librarian_rollup(block="grant", block_field="grant.role")
+
+
 def test_out_does_not_double_error_prefix():
     """When the CLI already printed `ERROR: ...` to stdout, _out keeps one prefix.
 

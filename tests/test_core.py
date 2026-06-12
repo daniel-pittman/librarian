@@ -2,12 +2,106 @@
 
 from __future__ import annotations
 
-from librarian.core import extract_contacts, scan_dangling_refs
+from librarian.core import extract_contacts, rollup_entries, scan_dangling_refs
 
 
 def _entry(eid: str, **fields) -> dict:
     """Build a minimal entry dict for the scanner."""
     return {"id": eid, **fields}
+
+
+# ---------------------------------------------------------------------------
+# rollup_entries — schema-agnostic aggregation (fictional data only)
+# ---------------------------------------------------------------------------
+
+
+def _grant_corpus() -> list[dict]:
+    """A small fixture corpus mixing grant-bearing and grant-less entries.
+
+    Fictional data only: Dr. Jane Roe at Acme University, sponsors like the
+    National Science Org. Amounts mix int, intish-string, and missing values.
+    """
+    return [
+        _entry(
+            "2025-01-grant-pi-awarded",
+            grant={
+                "amount": 500000,
+                "role": "pi",
+                "status": "awarded",
+                "sponsor": "National Science Org",
+            },
+        ),
+        _entry(
+            "2025-02-grant-copi-pending",
+            # An intish string — coercion must total it like an int.
+            grant={
+                "amount": "250000",
+                "role": "co-pi",
+                "status": "pending",
+                "sponsor": "Acme University",
+            },
+        ),
+        _entry(
+            "2025-03-grant-no-amount",
+            # No amount at all — contributes 0 but still counts; no status key.
+            grant={"role": "collaborator", "sponsor": "Roe Foundation"},
+        ),
+        # Two entries with NO grant block — must be excluded entirely.
+        _entry("2025-04-plain", title="A plain entry"),
+        _entry("2025-05-other-block", cpe={"group": "primary", "credits": 5}),
+    ]
+
+
+def test_rollup_excludes_entries_without_block():
+    """Only entries carrying the block are counted."""
+    result = rollup_entries(_grant_corpus(), "grant")
+    assert result["count"] == 3
+    assert result["block"] == "grant"
+    assert result["sum"] is None
+    assert result["groups"] is None
+
+
+def test_rollup_sum_mixes_int_intish_and_missing():
+    """sum totals int + intish-string and treats missing/non-numeric as 0."""
+    result = rollup_entries(_grant_corpus(), "grant", sum_field="amount")
+    assert result["count"] == 3
+    assert result["sum"] == 750000
+    assert result["sum_field"] == "amount"
+
+
+def test_rollup_group_by_with_unset():
+    """group_by buckets by value; a missing group field lands in '(unset)'."""
+    result = rollup_entries(_grant_corpus(), "grant", group_by="status")
+    assert result["group_by"] == "status"
+    groups = result["groups"]
+    assert groups["awarded"] == {"count": 1, "sum": None}
+    assert groups["pending"] == {"count": 1, "sum": None}
+    # The grant with no status key falls into the "(unset)" bucket.
+    assert groups["(unset)"] == {"count": 1, "sum": None}
+
+
+def test_rollup_sum_and_group_by_together():
+    """sum + group_by gives per-group counts and per-group sums."""
+    result = rollup_entries(_grant_corpus(), "grant", sum_field="amount", group_by="status")
+    assert result["sum"] == 750000
+    groups = result["groups"]
+    assert groups["awarded"] == {"count": 1, "sum": 500000}
+    assert groups["pending"] == {"count": 1, "sum": 250000}
+    # The (unset)-status grant has no amount, so its sum is 0.
+    assert groups["(unset)"] == {"count": 1, "sum": 0}
+
+
+def test_rollup_no_sum_no_group():
+    """The bare rollup reports only the count, with sum/groups None."""
+    result = rollup_entries(_grant_corpus(), "grant")
+    assert result == {
+        "block": "grant",
+        "count": 3,
+        "sum": None,
+        "sum_field": None,
+        "groups": None,
+        "group_by": None,
+    }
 
 
 _DESC = [("description", ["description"])]

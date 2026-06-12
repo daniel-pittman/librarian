@@ -69,10 +69,14 @@ by a **pluggable schema** you choose. It ships as:
   tracking, ...) are declared in a `schema.yaml`, not hardcoded. Add a block to
   an existing entry with `set-block <id> <block> <json>`; the whole block is
   validated atomically before the write.
-- **Four bundled schemas** — performance review, post-tenure review,
-  certification credits, student portfolio.
+- **Five bundled schemas** — performance review, post-tenure review,
+  certification credits, student portfolio, grant / funding.
 - **Full-text and structured search** — `search`, `filter`, `list`, `project`,
   `similar`, `stats`.
+- **Aggregation** — `rollup <block> [--sum FIELD] [--group-by FIELD]` totals a
+  block across the entries that carry it, e.g.
+  `librarian rollup grant --sum amount --group-by status` for a funding
+  portfolio breakdown (awarded vs. pending).
 - **Project aggregation** — `project <name>` lists every entry tagged with a
   project name and appends any keyword-only matches as a "more like this"
   section; `--strict` drops the appendix, `--broad` switches to keyword hits
@@ -174,6 +178,7 @@ librarian create --label cli:setup --json '{
 librarian search launch
 librarian filter --block-field review.competency leadership
 librarian stats
+librarian rollup grant --sum amount --group-by status
 librarian validate
 ```
 
@@ -197,7 +202,7 @@ depend on the value of a sibling field.
 With no `schema.yaml`, `librarian` runs in **generic mode**: full CRUD, search,
 and file-inventory still work; blocks are just not validated.
 
-### The four bundled schemas
+### The five bundled schemas
 
 Each maps to a concrete reporting moment. Pick the one that fits, or adapt one.
 
@@ -207,6 +212,7 @@ Each maps to a concrete reporting moment. Pick the one that fits, or adapt one.
 | `ptr.yaml` | academic faculty | **post-tenure review** — teaching, scholarly, and service classification |
 | `cpe.yaml` | certified professionals | **continuing-education credit reporting** — CISSP CPEs, PMP PDUs, nursing CEUs, etc. |
 | `student-portfolio.yaml` | students | **grad-school / scholarship / job applications** — coursework, projects, research, awards |
+| `grant.yaml` | grant holders | **funding-portfolio reporting** — award amount, role, status, sponsor; sum with `rollup` |
 
 To track more than one at once, merge the blocks from several schema files into
 one `schema.yaml` under a single `blocks:` mapping.
@@ -387,8 +393,9 @@ default.
 
 ## Command reference
 
-**Read:** `search`, `get`, `filter`, `list`, `stats`, `tags`, `tag-audit`,
-`validate`, `export`, `project`, `similar`, `contact`, `changes`, `schema`, `env`
+**Read:** `search`, `get`, `filter`, `list`, `stats`, `rollup`, `tags`,
+`tag-audit`, `validate`, `export`, `project`, `similar`, `contact`, `changes`,
+`schema`, `env`
 
 **Write:** `create`, `update-field`, `update-description`, `update-notes`,
 `update-nested-field`, `set-block`, `add-tags`, `remove-tags`, `add-docs`,
