@@ -136,9 +136,11 @@ def _intish(raw: object) -> int:
     """Coerce a block-field value to an int for summing, or ``0`` if it is not
     numeric.
 
-    Mirrors ``cmd_stats``' int-summing logic exactly: a real ``int`` counts as
+    Follows the same int-coercion as ``cmd_stats``: a real ``int`` counts as
     itself, an all-digit string (with an optional leading ``-``) is parsed, and
-    anything else (missing, ``None``, free text) contributes ``0``.
+    anything else (missing, ``None``, free text) contributes ``0``. It
+    ADDITIONALLY treats ``bool`` as non-numeric (``cmd_stats`` does not), so a
+    ``True``/``False`` field contributes ``0`` rather than ``1``/``0``.
     """
     if isinstance(raw, int) and not isinstance(raw, bool):
         return raw
@@ -172,8 +174,9 @@ def rollup_entries(
             contributes ``0``. A non-numeric or missing field does not drop the
             entry from the count. ``None`` to skip summing.
         group_by: A block field to break the rollup down by. Each distinct
-            ``str(value)`` becomes a group; entries missing the field land in
-            the ``"(unset)"`` group. ``None`` to skip grouping.
+            ``str(value)`` becomes a group; entries where the field is missing
+            or ``None`` land in the ``"(unset)"`` group. ``None`` to skip
+            grouping.
 
     Returns:
         A dict::
@@ -204,7 +207,8 @@ def rollup_entries(
         groups = {}
         for entry in with_block:
             data = entry.get(block) or {}
-            key = str(data.get(group_by, "(unset)")) if group_by in data else "(unset)"
+            val = data.get(group_by)
+            key = "(unset)" if val is None else str(val)
             bucket = groups.setdefault(
                 key, {"count": 0, "sum": 0 if sum_field is not None else None}
             )

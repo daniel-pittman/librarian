@@ -24,8 +24,9 @@ blocks:
     label: Grant / Funding
     fields:
       # The award amount in whole currency units (e.g. whole US dollars).
-      # Stored as an integer; `stats` and `rollup` sum it. Cents are rounded —
-      # funding portfolios report whole dollars.
+      # Stored as an integer; `stats` and `rollup` sum it. Whole units only:
+      # `type: int` rejects a fractional amount at validation time (it does not
+      # round), so funding portfolios record whole dollars.
       - name: amount
         type: int
 

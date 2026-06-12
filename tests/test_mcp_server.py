@@ -275,6 +275,17 @@ def test_rollup_tool_minimal_args(monkeypatch):
     assert captured["args"] == ["rollup", "grant", "--json"]
 
 
+def test_rollup_tool_rejects_malformed_block_field():
+    """A provided-but-malformed block_field (no '=') raises rather than dropping.
+
+    A truthy block_field that lacks the ``=`` separator can't be split into
+    BLOCK.FIELD and VALUE; silently ignoring it would scope nothing and mislead
+    the caller. A falsy block_field still means 'no filter' (covered elsewhere).
+    """
+    with pytest.raises(ValueError, match="BLOCK.FIELD=VALUE"):
+        mcp_server.librarian_rollup(block="grant", block_field="grant.role")
+
+
 def test_out_does_not_double_error_prefix():
     """When the CLI already printed `ERROR: ...` to stdout, _out keeps one prefix.
 

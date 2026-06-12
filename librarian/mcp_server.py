@@ -330,7 +330,9 @@ def librarian_rollup(
         args += ["--sum", sum_field]
     if group_by:
         args += ["--group-by", group_by]
-    if block_field and "=" in block_field:
+    if block_field:
+        if "=" not in block_field:
+            raise ValueError("block_field must be in BLOCK.FIELD=VALUE form")
         path, value = block_field.split("=", 1)
         args += ["--block-field", path, value]
     if after:

@@ -609,6 +609,14 @@ def cmd_rollup(ctx: Context, args: list[str]) -> int:
                 f"not int — only int fields can be summed."
             )
             return 1
+    # Soft check: when --group-by names a field the schema doesn't declare on a
+    # known block, the rollup buckets every entry under "(unset)". Warn (don't
+    # fail — generic mode and undeclared fields must still work).
+    if parsed.group_by and block_def is not None and block_def.field(parsed.group_by) is None:
+        print(
+            f"WARNING: --group-by field '{parsed.group_by}' is not declared on block "
+            f"'{block}'; the rollup will bucket everything under '(unset)'."
+        )
 
     during_start, during_end = _during_window(parsed.year, parsed.during)
 

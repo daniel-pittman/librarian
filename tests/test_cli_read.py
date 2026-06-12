@@ -167,7 +167,7 @@ blocks:
 _GRANT_ACTIVITIES = """\
 activities:
   - id: 2025-01-grant-pi
-    date: 2025-01-15
+    date: '2025-01-15'
     title: Funded study
     description: A funded study.
     tags: [grant, research]
@@ -178,7 +178,7 @@ activities:
       status: awarded
       sponsor: National Science Org
   - id: 2025-02-grant-copi
-    date: 2025-02-20
+    date: '2025-02-20'
     title: Pending proposal
     description: A pending proposal.
     tags: [grant]
@@ -189,7 +189,7 @@ activities:
       status: pending
       sponsor: Acme University
   - id: 2025-03-grant-seed
-    date: 2025-03-10
+    date: '2025-03-10'
     title: Internal seed award
     description: Seed funding.
     tags: [grant, research]
@@ -200,7 +200,7 @@ activities:
       status: awarded
       sponsor: Acme University
   - id: 2025-04-plain
-    date: 2025-04-01
+    date: '2025-04-01'
     title: Not a grant
     description: A non-grant entry.
     tags: []
@@ -279,6 +279,46 @@ def test_rollup_unknown_block_warns_but_runs(sandbox):
     assert rc == 0
     assert "WARNING" in out
     assert "count: 0" in out
+
+
+def test_rollup_honours_date_filter(sandbox):
+    """rollup scopes the set with --after / --before before aggregating."""
+    sandbox = _grant_sandbox(sandbox)
+    # The corpus has grant entries dated 2025-01-15, 2025-02-20, 2025-03-10.
+    # --after 2025-01-31 drops the January grant; --before 2025-03-01 drops
+    # the March grant, leaving only the pending February proposal (250000).
+    out, _, rc = sandbox.run(
+        "rollup",
+        "grant",
+        "--sum",
+        "amount",
+        "--after",
+        "2025-01-31",
+        "--before",
+        "2025-03-01",
+        "--json",
+    )
+    assert rc == 0
+    data = json.loads(out)
+    assert data["count"] == 1
+    assert data["sum"] == 250000
+
+
+def test_rollup_malformed_block_field_errors(sandbox):
+    """rollup --block-field without a '.' prints the BLOCK.FIELD error and fails."""
+    sandbox = _grant_sandbox(sandbox)
+    out, _, rc = sandbox.run("rollup", "grant", "--block-field", "status", "awarded")
+    assert rc != 0
+    assert "BLOCK.FIELD" in out
+
+
+def test_rollup_unknown_group_by_field_warns(sandbox):
+    """rollup --group-by on a field absent from the block warns but still runs."""
+    sandbox = _grant_sandbox(sandbox)
+    out, _, rc = sandbox.run("rollup", "grant", "--group-by", "nosuchfield")
+    assert rc == 0
+    assert "WARNING" in out
+    assert "(unset)" in out
 
 
 def test_tags(sandbox):
