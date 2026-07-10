@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # search / get
@@ -391,6 +393,41 @@ def test_tags(sandbox):
     assert "teaching" in out
 
 
+def test_tags_survives_numeric_tag_in_yaml(sandbox):
+    """A bare-numeric tag (unquoted integer in the on-disk YAML) must not
+    crash ``librarian tags``. YAML parses ``2026`` as an ``int`` and the
+    ``{tag:45s}`` format used to raise ``ValueError: Unknown format code
+    's' for object of type 'int'``. Issue #37 (and #39, its duplicate).
+
+    v1.8.2 fix: ``load_activities`` coerces every tag to ``str`` at the
+    single load boundary, and ``cmd_tags`` is defensively ``str(tag)``.
+    """
+    # Inject a numeric tag directly into the YAML — the CLI would normally
+    # quote strings on write, so this simulates a hand-edit.
+    text = sandbox.activities.read_text()
+    marker = "- teaching"
+    assert marker in text, "fixture layout drift"
+    # Insert a bare-integer tag as a peer of the first ``- teaching`` line.
+    text = text.replace(marker, marker + "\n      - 2026", 1)
+    sandbox.activities.write_text(text)
+    out, err, rc = sandbox.run("tags")
+    assert rc == 0, f"tags crashed on numeric tag: {out} / {err}"
+    assert "Unique tags:" in out
+    # The numeric tag surfaces in the listing as its string form.
+    assert "2026" in out
+
+
+def test_tag_audit_survives_numeric_tag_in_yaml(sandbox):
+    """Same coercion invariant for ``tag-audit`` (uses ``tag_kernel``,
+    which calls ``.casefold()`` on each tag — fails on int without the
+    load-time coercion)."""
+    text = sandbox.activities.read_text()
+    text = text.replace("- teaching", "- teaching\n      - 2026", 1)
+    sandbox.activities.write_text(text)
+    out, _, rc = sandbox.run("tag-audit")
+    assert rc == 0, f"tag-audit crashed on numeric tag: {out}"
+
+
 def test_tag_audit_clean(sandbox):
     """tag-audit reports a clean tag set for the fixture corpus."""
     out, _, rc = sandbox.run("tag-audit")
@@ -610,3 +647,51 @@ def test_version(sandbox):
     out, _, rc = sandbox.run("--version")
     assert rc == 0
     assert out.strip() == expected
+
+
+def test_empty_home_hint_fires_on_bare_default(tmp_path):
+    """A user who runs the bare CLI without any LIBRARIAN_* env var set,
+    against an empty XDG default home, gets a helpful hint pointing at
+    the resolved path — not silent zero-result output that reads as "the
+    entry doesn't exist".
+
+    v1.8.2 operational fix from the CLI-vs-MCP paths note: fresh sessions
+    that fall back to the CLI won't guess an entry is missing when it
+    just isn't in the default home.
+    """
+    import subprocess
+    import sys
+
+    # Point XDG_CONFIG_HOME at a fresh empty directory so the default home
+    # resolves to something guaranteed empty, and wipe every LIBRARIAN_*
+    # override so the "any override set" gate is false.
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        "XDG_CONFIG_HOME": str(tmp_path),
+    }
+    repo_root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "-m", "librarian.cli", "list"],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=repo_root,
+    )
+    assert result.returncode == 0
+    # The count-header still prints normally.
+    assert "Total entries: 0" in result.stdout
+    # The hint goes to stderr so it doesn't corrupt piped/scripted stdout.
+    assert "LIBRARIAN_YAML_PATH" in result.stderr or "LIBRARIAN_HOME" in result.stderr
+    assert "librarian env" in result.stderr
+
+
+def test_empty_home_hint_silent_when_override_set(sandbox):
+    """When LIBRARIAN_HOME is set (as the sandbox fixture does), an empty
+    result set must NOT trigger the hint — the user configured a path,
+    they own the emptiness."""
+    # A search that matches nothing yields zero results but shouldn't hint.
+    _, err, rc = sandbox.run("search", "zzzzz-no-such-token-anywhere")
+    assert rc == 0
+    assert "LIBRARIAN_YAML_PATH" not in err
+    assert "librarian env" not in err

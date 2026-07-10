@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -214,9 +215,57 @@ def _capped(result: dict, cap: int = 50_000) -> str:
 
     Used by the potentially large read tools (search / list / project) so a
     CLI failure still surfaces its stderr instead of returning empty output.
+
+    When truncation fires, the notice tries to reconstruct "showing M of N
+    entries" from the CLI's ``Found N entries ...`` count-header so a
+    partial result is never mistakable for a complete one — issue #38's
+    "silent drop past the cap" was the failure the naive
+    ``[... truncated]`` marker permitted. Callers can then reissue with
+    narrower filters or fetch specific ids via ``librarian_get``.
     """
     out = _out(result)
-    return out if len(out) <= cap else out[:cap] + "\n\n[... truncated]"
+    if len(out) <= cap:
+        return out
+    truncated = out[:cap]
+    # Try to surface how many entries the CLI actually enumerated so the
+    # caller knows how many got dropped.
+    total: int | None = None
+    for line in out.splitlines()[:3]:
+        # Common count-header shapes:
+        #   "Found N entries matching '...':"
+        #   "Found N tag-matched entries for '...':"
+        #   "Total entries: N"
+        # Match the first integer on any of these lines.
+        m = re.search(r"\b(?:Found|Total entries:)\s*(\d+)\b", line)
+        if m:
+            total = int(m.group(1))
+            break
+    # Count how many complete entries survive in the truncated body.
+    shown = _count_surviving_entries(truncated)
+    if total is not None:
+        notice = (
+            f"\n\n[... truncated: showing {shown} of {total} entries. "
+            f"Narrow the query, use a brief mode, or fetch individual ids "
+            f"via librarian_get.]"
+        )
+    else:
+        notice = "\n\n[... truncated: response exceeded output cap.]"
+    return truncated + notice
+
+
+def _count_surviving_entries(text: str) -> int:
+    """Count complete entries in a possibly-truncated CLI output.
+
+    Brief output prints one ``id`` per line inside a table row; full output
+    prints ``id:`` fields inside a YAML block. We take the union of the two
+    conservative signals so brief-vs-full truncation both surface a count.
+    """
+    # Full-mode: each YAML entry has a top-level ``id: <slug>`` line.
+    full_count = len(re.findall(r"(?m)^id:\s+\S+", text))
+    if full_count:
+        return full_count
+    # Brief-mode: each row starts with two spaces, a date, and a pipe.
+    return len(re.findall(r"(?m)^\s{2}\d{4}-\d{2}-\d{2}\s+\|", text))
 
 
 # =============================================================================
@@ -226,15 +275,27 @@ def _capped(result: dict, cap: int = 50_000) -> str:
 
 @mcp.tool()
 def librarian_search(
-    query: str, changed_since: str | None = None, changed_until: str | None = None
+    query: str,
+    changed_since: str | None = None,
+    changed_until: str | None = None,
+    full: bool = False,
 ) -> str:
     """Full-text search across all entries. Use first when asked "is X tracked?".
 
-    `changed_since` / `changed_until` restrict results to entries whose last
-    ledger-recorded change falls in that window (ISO timestamp; naive = UTC).
-    Entries with no ledger history are excluded when either bound is set.
+    Returns brief rows by default (id, date, title) so a wide query fits
+    under the MCP output cap without silently dropping tail results — the
+    v1.8.2 fix for issue #38. Follow up with ``librarian_get`` for each id
+    you want the full body of. Pass ``full=True`` to receive complete entry
+    bodies, understanding that broad queries may hit the truncation cap.
+
+    ``changed_since`` / ``changed_until`` restrict results to entries whose
+    last ledger-recorded change falls in that window (ISO timestamp; naive
+    = UTC). Entries with no ledger history are excluded when either bound
+    is set.
     """
     args = ["search", query]
+    if not full:
+        args.append("--brief")
     if changed_since:
         args += ["--changed-since", changed_since]
     if changed_until:
@@ -410,9 +471,17 @@ def librarian_similar(text: str) -> str:
 
 
 @mcp.tool()
-def librarian_project(project_name: str) -> str:
-    """Return all entries tagged or keyword-matched for a project."""
-    return _capped(_run_cli(["project", project_name]))
+def librarian_project(project_name: str, full: bool = False) -> str:
+    """Return all entries tagged or keyword-matched for a project.
+
+    Brief by default so a project with dozens of entries fits under the
+    output cap. Pass ``full=True`` to receive complete bodies (may
+    truncate on very large projects — issue #38 mitigation).
+    """
+    args = ["project", project_name]
+    if not full:
+        args.append("--brief")
+    return _capped(_run_cli(args))
 
 
 @mcp.tool()

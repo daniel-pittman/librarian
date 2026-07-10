@@ -316,8 +316,41 @@ def test_capped_surfaces_stderr_and_truncates():
     assert mcp_server._capped({"ok": False, "stdout": "", "stderr": "boom"}) == "ERROR: boom"
     big = "x" * 60_000
     out = mcp_server._capped({"ok": True, "stdout": big, "stderr": ""}, cap=50_000)
-    assert out.endswith("[... truncated]")
+    # Truncation notice includes the "[... truncated" marker so callers can
+    # detect a partial result. v1.8.2 issue #38 replaced the naive
+    # ``[... truncated]`` marker with a "showing M of N entries" hint when
+    # a count-header is present, and a generic "response exceeded output
+    # cap" notice otherwise — either way the marker starts with the same
+    # bracket prefix so existing consumers keep matching.
+    assert "[... truncated" in out
     assert len(out) < len(big)
+
+
+def test_capped_showing_m_of_n_when_count_header_present():
+    """When the CLI stdout starts with a ``Found N entries`` count header
+    and the response gets truncated, _capped reports how many entries
+    survived so a caller can never mistake a partial result for a
+    complete one (issue #38 fix)."""
+    header = "Found 20 entries matching 'foo':\n\n"
+    # 20 brief-mode rows, each with the ``  YYYY-MM-DD | id | title`` shape
+    # so _count_surviving_entries can detect them.
+    rows = [
+        f"  2026-07-{i + 1:02d} | 2026-07-entry-{i:02d}                    | Title {i}\n"
+        for i in range(20)
+    ]
+    stdout = header + "".join(rows)
+    # Cap in the middle so a partial body triggers truncation.
+    cap = len(header) + sum(len(r) for r in rows[:5])
+    out = mcp_server._capped({"ok": True, "stdout": stdout, "stderr": ""}, cap=cap)
+    assert "showing" in out and "of 20 entries" in out
+
+
+def test_capped_generic_notice_when_no_count_header():
+    """When there's no count-header to extract from, _capped falls back
+    to a generic truncation notice."""
+    stdout = "x" * 60_000  # no Found/Total header
+    out = mcp_server._capped({"ok": True, "stdout": stdout, "stderr": ""}, cap=50_000)
+    assert "response exceeded output cap" in out
 
 
 def test_changes_since_does_not_swallow_errors(monkeypatch):
@@ -377,3 +410,48 @@ def test_changed_window_params_translate_to_flags(monkeypatch, tool, kwargs, exp
         assert flag in args, f"{flag} missing from {args}"
         i = args.index(flag)
         assert args[i : i + 2] == [flag, value], f"{flag} not adjacent to {value} in {args}"
+
+
+def test_librarian_search_defaults_to_brief(monkeypatch):
+    """The MCP ``librarian_search`` wrapper defaults to ``--brief`` so a
+    broad query fits under the output cap and doesn't silently drop
+    tail results. Issue #38 fix.
+    """
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        return {"ok": True, "stdout": "", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    mcp_server.librarian_search("anything")
+    assert "--brief" in captured["args"], (
+        f"librarian_search should pass --brief by default: {captured['args']}"
+    )
+
+
+def test_librarian_search_full_true_drops_brief(monkeypatch):
+    """Callers who really want full bodies can pass ``full=True``."""
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        return {"ok": True, "stdout": "", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    mcp_server.librarian_search("anything", full=True)
+    assert "--brief" not in captured["args"]
+
+
+def test_librarian_project_defaults_to_brief(monkeypatch):
+    """Same brief-default treatment for ``librarian_project`` — a project
+    with dozens of entries would silently truncate without it."""
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        return {"ok": True, "stdout": "", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    mcp_server.librarian_project("some-project")
+    assert "--brief" in captured["args"]
