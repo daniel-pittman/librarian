@@ -282,6 +282,43 @@ def _resolve_label(args: list[str], *, required: bool = True) -> str | None:
     return label
 
 
+_LIBRARIAN_PATH_VARS = (
+    "LIBRARIAN_HOME",
+    "LIBRARIAN_YAML_PATH",
+    "LIBRARIAN_FILES_PATH",
+    "LIBRARIAN_LEDGER_PATH",
+    "LIBRARIAN_SCHEMA_PATH",
+    "LIBRARIAN_ROOT",
+)
+
+
+def _print_empty_home_hint_if_default(ctx: Context) -> None:
+    """When a read command yields zero results AND no LIBRARIAN_* path
+    override is set AND the activities file doesn't exist, print a
+    single-line hint pointing at the resolved path.
+
+    A user running the bare CLI from a fresh shell may not realize their
+    real data home is configured via env vars in the MCP server config; the
+    default path is empty, ``list``/``search``/etc. return nothing, and
+    they conclude the entry doesn't exist. The hint sends them to
+    ``librarian env`` (or points at the env vars) instead of guessing.
+
+    Silent when at least one LIBRARIAN_* var was set (the user knows what
+    they configured; a legitimately-empty override doesn't need a hint) or
+    when the file exists (silence is correct — empty is empty).
+    """
+    if any(os.environ.get(v, "").strip() for v in _LIBRARIAN_PATH_VARS):
+        return
+    if ctx.paths.activities.exists():
+        return
+    print(
+        f"\nNo activities.yaml at {ctx.paths.activities} (bare-CLI default). "
+        f"If your data lives elsewhere, set LIBRARIAN_YAML_PATH or "
+        f"LIBRARIAN_HOME; run 'librarian env' to see resolved paths.",
+        file=sys.stderr,
+    )
+
+
 def print_entry(entry: dict, *, brief: bool = False) -> None:
     """Print one entry — id/date/title in brief mode, full YAML otherwise."""
     if brief:
@@ -349,6 +386,8 @@ def cmd_search(ctx: Context, args: list[str]) -> int:
     print(f"Found {len(results)} entries matching '{parsed.query}':\n")
     for entry in results:
         print_entry(entry, brief=parsed.brief)
+    if not results:
+        _print_empty_home_hint_if_default(ctx)
 
     # Cross-surface the file inventory: note any inventory files that match.
     file_hits = len(search_files(load_files(ctx.paths.files), parsed.query))
@@ -510,6 +549,8 @@ def cmd_list(ctx: Context, args: list[str]) -> int:
         print(f"  {'-' * 12} | {'-' * 42} | {'-' * 80}")
     for entry in activities:
         print_entry(entry, brief=brief)
+    if not activities:
+        _print_empty_home_hint_if_default(ctx)
     return 0
 
 
@@ -674,10 +715,18 @@ def cmd_tags(ctx: Context, args: list[str]) -> int:
     counts: dict[str, int] = {}
     for entry in activities:
         for tag in entry.get("tags", []) or []:
-            counts[tag] = counts.get(tag, 0) + 1
+            # ``str(tag)`` is defensive: ``load_activities`` already coerces
+            # tags to str (v1.8.2 fix for issue #37), so a stray non-string
+            # tag here would indicate a bypass of that boundary. Better to
+            # display it than to crash the listing this command exists to
+            # produce.
+            key = str(tag)
+            counts[key] = counts.get(key, 0) + 1
     print(f"Unique tags: {len(counts)}\n")
     for tag, count in sorted(counts.items(), key=lambda kv: -kv[1]):
         print(f"  {tag:45s} {count:4d}")
+    if not counts:
+        _print_empty_home_hint_if_default(ctx)
     return 0
 
 
@@ -889,6 +938,8 @@ def cmd_project(ctx: Context, args: list[str]) -> int:
     print(f"Found {len(entries)} {label} entries for '{project}':\n")
     for entry in entries:
         print_entry(entry, brief=brief)
+    if not entries and not activities:
+        _print_empty_home_hint_if_default(ctx)
 
     if not strict and not broad:
         extra = sorted(keyword_hits - tag_hits)
@@ -938,6 +989,7 @@ def cmd_similar(ctx: Context, args: list[str]) -> int:
 
     if not results:
         print(f"No similar entries found (threshold: {threshold})")
+        _print_empty_home_hint_if_default(ctx)
         return 0
     print(f"Found {len(results)} similar entries (threshold: {threshold}):\n")
     for score, entry in results[:10]:

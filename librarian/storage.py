@@ -77,12 +77,28 @@ def load_activities(yaml_path: Path) -> tuple[dict, list[dict]]:
 
     Returns a ``(meta, activities)`` tuple. A missing file yields empty
     structures so first-run commands degrade gracefully rather than crashing.
+
+    Every tag is coerced to ``str`` here at the single load boundary — an
+    unquoted numeric tag in the on-disk YAML (a year ``2026``, a course
+    number ``3755``, a grant number ``1234567``) would otherwise arrive as
+    an ``int`` and break every downstream tag consumer that does ``.lower()``
+    / ``.casefold()`` / ``{tag:45s}`` formatting (``cmd_tags``,
+    ``cmd_tag_audit``, ``cmd_project``, ``tag_kernel``, ...). Coercing on
+    load fixes every consumer at once. Line-level YAML editing is unaffected
+    — writers operate on raw lines via ``read_lines``, not on this parsed
+    representation.
     """
     if not yaml_path.exists():
         return {}, []
     with open(yaml_path, encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
-    return data.get("meta", {}) or {}, data.get("activities", []) or []
+    meta = data.get("meta", {}) or {}
+    activities = data.get("activities", []) or []
+    for entry in activities:
+        tags = entry.get("tags")
+        if isinstance(tags, list):
+            entry["tags"] = [str(t) for t in tags]
+    return meta, activities
 
 
 def read_lines(yaml_path: Path) -> list[str]:
