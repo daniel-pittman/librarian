@@ -335,6 +335,84 @@ def test_update_nested_field_rejects_bad_dependent_enum(sandbox):
     assert "INVALID" in out
 
 
+def test_update_nested_field_multiline_value_writes_literal_block(sandbox):
+    """A value containing newlines must render as a literal block scalar
+    (``|`` with indented continuation lines), not a single-line quoted
+    scalar with embedded newlines.
+
+    v1.8.3 fix for issue #42 (severe corpus corruption): the previous
+    render emitted ``notes: "line1\\nline2"`` with a LITERAL newline
+    mid-value, so the continuation landed at column 1, terminated the
+    mapping, and hard-errored on the next YAML load — especially when a
+    line started with ``*`` (Markdown bold ``**Word**``), which YAML
+    then tried to parse as an alias.
+    """
+    value = "First paragraph.\n\n**Second** paragraph with markdown bold."
+    out, err, rc = sandbox.run("update-nested-field", "2025-02-conference-talk", "ptr.notes", value)
+    assert rc == 0, f"write failed: {out} / {err}"
+    # File must still parse cleanly — the whole point of this fix.
+    parsed_notes = sandbox.entry("2025-02-conference-talk")["ptr"]["notes"]
+    # Literal block scalars preserve the content verbatim (possibly with a
+    # trailing newline). Compare after stripping trailing whitespace.
+    assert parsed_notes.rstrip() == value.rstrip()
+    # The on-disk shape uses ``|`` with indented continuation, NOT ``"..."``.
+    text = sandbox.activities.read_text()
+    assert "notes: |" in text
+    # And no continuation line landed at column 1 (the corruption
+    # signature). Every non-blank line either starts with whitespace or is
+    # a ``- id:`` entry marker or a top-level key.
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("- ") or line.startswith("activities:") or line.startswith("meta:"):
+            continue
+        assert line.startswith(" "), f"unindented continuation would corrupt YAML: {line!r}"
+
+
+def test_update_nested_field_multiline_value_survives_validate(sandbox):
+    """The whole database must still ``validate`` cleanly after a
+    multi-line update-nested-field write. This pins the invariant that
+    burned the corpus in issue #42 (39 subsequent commands failed after
+    a single bad write).
+    """
+    value = "Line A.\n\n**Bold** line B.\n\n* Bullet"
+    sandbox.run("update-nested-field", "2025-02-conference-talk", "ptr.notes", value)
+    out, _, rc = sandbox.run("validate")
+    assert rc == 0, f"validate crashed after multi-line write: {out}"
+
+
+def test_update_nested_field_rolls_back_on_invalid_yaml(sandbox, monkeypatch):
+    """Defense-in-depth: if a future render path regression produces
+    invalid YAML, ``update-nested-field`` must detect that before the
+    ledger row commits and roll the file back to its pre-write state
+    — never leaving a corrupted database behind.
+
+    Force the corruption by monkey-patching the render helper to emit
+    the old broken shape, then confirm the file is unchanged and the
+    ledger has no new row.
+    """
+    from librarian import cli as _cli
+
+    original = sandbox.activities.read_text()
+
+    def broken_render(field_name, value, indent, *, rendered_scalar):
+        # Emit a single line with a LITERAL newline mid-value — the
+        # exact shape that caused issue #42.
+        return [f'{" " * indent}{field_name}: "line1\nline2"\n']
+
+    monkeypatch.setattr(_cli, "_render_field_lines", broken_render)
+    # Also drive via a direct in-process call so the monkeypatch applies
+    # (subprocess runs bypass monkeypatch); load the CLI's context.
+    ctx = _cli.build_context()
+    rc = _cli.cmd_update_nested_field(
+        ctx,
+        ["--label", "test:rollback", "2025-02-conference-talk", "ptr.notes", "broken"],
+    )
+    assert rc == 1
+    # File must be byte-for-byte the pre-write state.
+    assert sandbox.activities.read_text() == original
+
+
 # ---------------------------------------------------------------------------
 # set-block (add a schema block to an existing entry)
 # ---------------------------------------------------------------------------
