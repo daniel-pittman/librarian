@@ -1399,11 +1399,15 @@ def _splice_block_into_entry(
         for fdef in block_def.fields:
             if fdef.name not in block_data:
                 continue
-            rendered = _render_scalar(fdef, block_data[fdef.name])
-            new_lines.append(f"{' ' * sub_indent}{fdef.name}: {rendered}\n")
+            value = block_data[fdef.name]
+            rendered = _render_scalar(fdef, value)
+            new_lines.extend(
+                _render_field_lines(fdef.name, value, sub_indent, rendered_scalar=rendered)
+            )
     else:
         for key, value in block_data.items():
-            new_lines.append(f"{' ' * sub_indent}{key}: {_render_generic_scalar(value)}\n")
+            rendered = _render_generic_scalar(value)
+            new_lines.extend(_render_field_lines(key, value, sub_indent, rendered_scalar=rendered))
 
     lines[insert_idx:insert_idx] = new_lines
     return len(new_lines)
@@ -1721,6 +1725,32 @@ def _render_entry(ctx: Context, data: dict, *, indent: int = 2) -> str:
     for tag in data.get("tags", []) or []:
         out.append(f"{sub}- {tag}")
     return "\n".join(out) + "\n"
+
+
+def _render_field_lines(field_name: str, value, indent: int, *, rendered_scalar: str) -> list[str]:
+    """Return the on-disk lines for ``<field_name>: <value>`` at ``indent``.
+
+    Multi-line string values render as a literal block scalar (``|`` with
+    continuation lines indented ``+2`` beyond the field name) — NEVER as a
+    single-line quoted scalar with embedded newlines. That trap was
+    responsible for the v1.8.2 corpus-corruption bug (issue #42): the
+    quoted form emitted ``notes: "line1\\nline2"`` with a literal newline,
+    the continuation landed at column 1, terminated the mapping, and
+    hard-errored on the next YAML load when the line started with ``*``.
+
+    ``rendered_scalar`` is the single-line rendering the caller already
+    computed (via ``_render_scalar`` or ``_render_generic_scalar``); we
+    use it directly for single-line values and ignore it for multi-line
+    text so the caller doesn't have to know which path applied.
+    """
+    if isinstance(value, str) and "\n" in value:
+        pad = " " * indent
+        body_pad = " " * (indent + 2)
+        out = [f"{pad}{field_name}: |\n"]
+        for body_line in value.split("\n"):
+            out.append(f"{body_pad}{body_line.rstrip()}\n")
+        return out
+    return [f"{' ' * indent}{field_name}: {rendered_scalar}\n"]
 
 
 def _render_scalar(field, value) -> str:
@@ -2072,10 +2102,34 @@ def cmd_update_notes(ctx: Context, args: list[str]) -> int:
         if stripped.startswith(f"{block_name}:"):
             in_block = True
         elif in_block and stripped.startswith(f"{field_name}:"):
-            indent = " " * line_indent(lines[i])
+            field_indent = line_indent(lines[i])
             field_end = _scalar_end(lines, i, field_name, end)
-            lines[i:field_end] = [f"{indent}{field_name}: {yaml_quote(new_notes)}\n"]
+            # ``update-notes`` reads prose from stdin, so multi-line values
+            # are the COMMON case, not the edge case. Route through
+            # ``_render_field_lines`` so a multi-paragraph note with
+            # Markdown bold (``**word**``) renders as a literal block
+            # scalar instead of the corrupting embedded-newline quoted
+            # form. Same class as issue #42 — this path was the most
+            # exposed to it and was missed in the initial v1.8.3 fix.
+            rendered = yaml_quote(new_notes)
+            new_lines = _render_field_lines(
+                field_name, new_notes, field_indent, rendered_scalar=rendered
+            )
+            original_lines = read_lines(ctx.paths.activities)
+            lines[i:field_end] = new_lines
             write_lines(ctx.paths.activities, lines)
+            # Same defense-in-depth rollback as cmd_update_nested_field:
+            # if the write produced invalid YAML, restore and abort.
+            try:
+                load_activities(ctx.paths.activities)
+            except yaml.YAMLError as exc:
+                write_lines(ctx.paths.activities, original_lines)
+                print(
+                    f"ERROR: refusing to commit — the write produced invalid "
+                    f"YAML ({exc.__class__.__name__}). The file has been "
+                    f"rolled back; the notes were NOT modified."
+                )
+                return 1
             append_ledger(
                 ctx.paths.ledger,
                 f"update-notes/{block_name}",
@@ -2168,8 +2222,14 @@ def cmd_update_nested_field(ctx: Context, args: list[str]) -> int:
         return 1
 
     child_indent = block_indent + 2
+    # ``_render_field_lines`` emits a literal block scalar for multi-line
+    # text and a normal single-line ``key: value`` otherwise. Issue #42:
+    # the old ``yaml_quote``-embedded-newline render corrupted the file
+    # (continuation lines at column 1 terminated the mapping and, when a
+    # line started with ``*`` — common with Markdown bold ``**word**``,
+    # tripped the YAML alias parser).
     rendered = _render_scalar(field_def, coerced)
-    new_line = f"{' ' * child_indent}{field_name}: {rendered}\n"
+    new_lines = _render_field_lines(field_name, coerced, child_indent, rendered_scalar=rendered)
 
     field_idx = None
     for i in range(block_idx + 1, block_end):
@@ -2178,12 +2238,33 @@ def cmd_update_nested_field(ctx: Context, args: list[str]) -> int:
             break
     if field_idx is not None:
         field_end = _scalar_end(lines, field_idx, field_name, block_end)
-        lines[field_idx:field_end] = [new_line]
+        lines[field_idx:field_end] = new_lines
         action = "updated"
     else:
-        lines.insert(block_end, new_line)
+        lines[block_end:block_end] = new_lines
         action = "inserted"
+
+    # Post-write verification with rollback: parse the resulting file
+    # before letting the ledger commit. If the write produced invalid
+    # YAML (a class of bug that already burned the corpus once — issue
+    # #42), roll the file back to its pre-write state and abort with a
+    # clear error instead of leaving a corrupted database. The activities
+    # lock (via ``@_activities_locked``) means no other writer can land
+    # between our write and our verify.
+    original_lines = read_lines(ctx.paths.activities)
     write_lines(ctx.paths.activities, lines)
+    try:
+        load_activities(ctx.paths.activities)
+    except yaml.YAMLError as exc:
+        write_lines(ctx.paths.activities, original_lines)
+        print(
+            f"ERROR: refusing to commit — the write produced invalid YAML "
+            f"({exc.__class__.__name__}). The file has been rolled back to "
+            f"its pre-write state; the entry was NOT modified. This is a "
+            f"defense-in-depth guard; please open an issue with the value "
+            f"you tried to write so the render path can be hardened."
+        )
+        return 1
     append_ledger(
         ctx.paths.ledger,
         "update-nested-field",
@@ -2289,19 +2370,33 @@ def cmd_set_block(ctx: Context, args: list[str]) -> int:
         )
         return 1
 
-    # Reject any string value containing a newline, regardless of its declared
-    # schema type. yaml_quote emits a single-quoted scalar that can't carry a
-    # raw LF, so the splice would corrupt the file on the next read. A
-    # type-agnostic guard (any str) closes the entire bug class, including
-    # date / date? values whose ISO regex happily anchors before a trailing LF.
+    # Reject newlines in fields whose declared schema type is NOT ``text``
+    # — enum / string / int / bool / date / date? fields are all
+    # single-line by semantics, and a multi-line value would silently
+    # persist as prose in a slot the tool treats as an atomic identifier
+    # / number / ISO date. ``text``-typed fields legitimately hold
+    # multi-paragraph prose and now render as a literal block scalar
+    # (v1.8.3 render helper) so a newline there is safe. Raw ``\r`` is
+    # rejected everywhere: the literal-block render splits on ``\n``, so
+    # a stray CR would land inside a body line and re-emerge on read.
     for fname, val in block_data.items():
-        if isinstance(val, str) and ("\n" in val or "\r" in val):
+        if not isinstance(val, str):
+            continue
+        if "\r" in val:
             print(
-                f"ERROR: field '{fname}' contains a newline; "
-                f"multi-line values are not supported by set-block "
-                f"(write the entry's description instead)"
+                f"ERROR: field '{fname}' contains a carriage return; "
+                f"strip the ``\\r`` from the value before writing"
             )
             return 1
+        if "\n" in val:
+            fdef = block_def.field(fname)
+            if fdef is not None and fdef.type != "text":
+                print(
+                    f"ERROR: field '{fname}' contains a newline but its "
+                    f"declared type is '{fdef.type}' (single-line). Only "
+                    f"``text``-typed fields accept multi-line values."
+                )
+                return 1
 
     # Coerce stringy primitives (int, bool, date) to their native types before
     # validation, so e.g. {"credits": "08"} becomes int 8 and round-trips as a
