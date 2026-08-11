@@ -2102,10 +2102,34 @@ def cmd_update_notes(ctx: Context, args: list[str]) -> int:
         if stripped.startswith(f"{block_name}:"):
             in_block = True
         elif in_block and stripped.startswith(f"{field_name}:"):
-            indent = " " * line_indent(lines[i])
+            field_indent = line_indent(lines[i])
             field_end = _scalar_end(lines, i, field_name, end)
-            lines[i:field_end] = [f"{indent}{field_name}: {yaml_quote(new_notes)}\n"]
+            # ``update-notes`` reads prose from stdin, so multi-line values
+            # are the COMMON case, not the edge case. Route through
+            # ``_render_field_lines`` so a multi-paragraph note with
+            # Markdown bold (``**word**``) renders as a literal block
+            # scalar instead of the corrupting embedded-newline quoted
+            # form. Same class as issue #42 — this path was the most
+            # exposed to it and was missed in the initial v1.8.3 fix.
+            rendered = yaml_quote(new_notes)
+            new_lines = _render_field_lines(
+                field_name, new_notes, field_indent, rendered_scalar=rendered
+            )
+            original_lines = read_lines(ctx.paths.activities)
+            lines[i:field_end] = new_lines
             write_lines(ctx.paths.activities, lines)
+            # Same defense-in-depth rollback as cmd_update_nested_field:
+            # if the write produced invalid YAML, restore and abort.
+            try:
+                load_activities(ctx.paths.activities)
+            except yaml.YAMLError as exc:
+                write_lines(ctx.paths.activities, original_lines)
+                print(
+                    f"ERROR: refusing to commit — the write produced invalid "
+                    f"YAML ({exc.__class__.__name__}). The file has been "
+                    f"rolled back; the notes were NOT modified."
+                )
+                return 1
             append_ledger(
                 ctx.paths.ledger,
                 f"update-notes/{block_name}",
@@ -2346,19 +2370,33 @@ def cmd_set_block(ctx: Context, args: list[str]) -> int:
         )
         return 1
 
-    # Reject any string value containing a newline, regardless of its declared
-    # schema type. yaml_quote emits a single-quoted scalar that can't carry a
-    # raw LF, so the splice would corrupt the file on the next read. A
-    # type-agnostic guard (any str) closes the entire bug class, including
-    # date / date? values whose ISO regex happily anchors before a trailing LF.
+    # Reject newlines in fields whose declared schema type is NOT ``text``
+    # — enum / string / int / bool / date / date? fields are all
+    # single-line by semantics, and a multi-line value would silently
+    # persist as prose in a slot the tool treats as an atomic identifier
+    # / number / ISO date. ``text``-typed fields legitimately hold
+    # multi-paragraph prose and now render as a literal block scalar
+    # (v1.8.3 render helper) so a newline there is safe. Raw ``\r`` is
+    # rejected everywhere: the literal-block render splits on ``\n``, so
+    # a stray CR would land inside a body line and re-emerge on read.
     for fname, val in block_data.items():
-        if isinstance(val, str) and ("\n" in val or "\r" in val):
+        if not isinstance(val, str):
+            continue
+        if "\r" in val:
             print(
-                f"ERROR: field '{fname}' contains a newline; "
-                f"multi-line values are not supported by set-block "
-                f"(write the entry's description instead)"
+                f"ERROR: field '{fname}' contains a carriage return; "
+                f"strip the ``\\r`` from the value before writing"
             )
             return 1
+        if "\n" in val:
+            fdef = block_def.field(fname)
+            if fdef is not None and fdef.type != "text":
+                print(
+                    f"ERROR: field '{fname}' contains a newline but its "
+                    f"declared type is '{fdef.type}' (single-line). Only "
+                    f"``text``-typed fields accept multi-line values."
+                )
+                return 1
 
     # Coerce stringy primitives (int, bool, date) to their native types before
     # validation, so e.g. {"credits": "08"} becomes int 8 and round-trips as a

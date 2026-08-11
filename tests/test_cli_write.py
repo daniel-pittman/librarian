@@ -291,6 +291,38 @@ def test_update_notes_with_embedded_quotes(sandbox):
     assert sandbox.entry("2025-02-conference-talk")["ptr"]["notes"] == text
 
 
+def test_update_notes_multiline_value_writes_literal_block(sandbox):
+    """``update-notes`` reads prose from stdin — the COMMON case is
+    multi-paragraph notes. Pre-fix the write went through ``yaml_quote``
+    and embedded literal newlines mid-value, producing the same
+    column-1-continuation corruption issue #42 tracked for
+    ``update-nested-field``. The reviewer of PR #44 caught this as a
+    same-class HIGH; ``update-notes`` is arguably the MOST exposed
+    path.
+
+    v1.8.3 round-2 fix: route through ``_render_field_lines`` and the
+    parse-and-rollback guard.
+    """
+    text = "First paragraph.\n\n**Second** paragraph with markdown bold.\n\n* Bullet list item"
+    sandbox.run("update-notes", "2025-02-conference-talk", stdin=text)
+    parsed = sandbox.entry("2025-02-conference-talk")["ptr"]["notes"]
+    assert parsed.rstrip() == text.rstrip()
+    # On-disk shape uses the literal block scalar, not the corrupting
+    # single-line quoted form.
+    yaml_text = sandbox.activities.read_text()
+    assert "notes: |" in yaml_text
+    # And no continuation line landed at column 1.
+    for line in yaml_text.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("- ") or line.startswith("activities:") or line.startswith("meta:"):
+            continue
+        assert line.startswith(" "), f"unindented continuation would corrupt YAML: {line!r}"
+    # End-to-end: the whole DB still validates.
+    out, _, rc = sandbox.run("validate")
+    assert rc == 0, f"validate crashed after multi-line update-notes: {out}"
+
+
 # ---------------------------------------------------------------------------
 # update-nested-field (schema-validated)
 # ---------------------------------------------------------------------------
@@ -453,6 +485,33 @@ def test_set_block_adds_full_block_to_existing_entry(sandbox):
     assert cpe["credits"] == 10  # int, not "10"
     assert cpe["submitted"] is True  # bool, not "true"
     assert cpe["notes"] == "ten credits"
+
+
+def test_set_block_multiline_text_field_writes_literal_block(sandbox):
+    """A ``set-block`` call whose JSON contains a multi-line text field
+    must render it as a literal block scalar, not an embedded-newline
+    quoted scalar. Direct coverage of the splice path v1.8.3 changed —
+    the update-nested-field tests exercise the helper but not the splice
+    branch. Reviewer's PR #44 MEDIUM.
+    """
+    sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
+    multi = "First paragraph.\n\n**Second** paragraph with markdown bold."
+    out, _, rc = sandbox.run(
+        "set-block",
+        "2026-09-sb-target",
+        "cpe",
+        "--json",
+        json.dumps({"group": "primary", "credits": 4, "notes": multi}),
+    )
+    assert rc == 0, f"set-block failed: {out}"
+    parsed = sandbox.entry("2026-09-sb-target")["cpe"]["notes"]
+    assert parsed.rstrip() == multi.rstrip()
+    # On-disk shape: notes rendered as ``notes: |`` literal block.
+    text = sandbox.activities.read_text()
+    assert "notes: |" in text
+    # And the DB still validates end-to-end.
+    _, _, rc = sandbox.run("validate")
+    assert rc == 0
 
 
 def test_set_block_preserves_existing_block_and_core_fields(sandbox):
@@ -724,8 +783,13 @@ def test_set_block_bool_case_insensitive(sandbox):
     assert cpe["submitted"] is True
 
 
-def test_set_block_rejects_text_with_newline(sandbox):
-    """Multi-line text values would break the single-line YAML splice."""
+def test_set_block_accepts_text_with_newline(sandbox):
+    """v1.8.3: ``text``-typed fields (e.g. cpe.notes) legitimately hold
+    multi-paragraph prose. The new render path emits a literal block
+    scalar for multi-line strings, so what was rejected as unsafe in
+    the v1.7.x era is now the working common case. Non-text fields
+    still reject newlines (see the string / date tests below).
+    """
     sandbox.run("create", stdin=json.dumps(_ptr_only_entry()))
     out, _, rc = sandbox.run(
         "set-block",
@@ -734,8 +798,9 @@ def test_set_block_rejects_text_with_newline(sandbox):
         "--json",
         json.dumps({"group": "primary", "credits": 1, "notes": "line1\nline2"}),
     )
-    assert rc == 1
-    assert "newline" in out.lower()
+    assert rc == 0, f"set-block should accept multi-line notes: {out}"
+    parsed = sandbox.entry("2026-09-sb-target")["cpe"]["notes"]
+    assert parsed.rstrip() == "line1\nline2"
 
 
 def test_set_block_coerces_stringy_int_to_native_int(sandbox):
