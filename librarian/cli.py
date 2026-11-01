@@ -2182,7 +2182,7 @@ def cmd_contact_update(ctx: Context, args: list[str]) -> int:
         changed = []
         for mention in mentions:
             if mention.start is None or mention.end is None:
-                context = _context_snippet(description, mention.bracket, mention.bracket)
+                context = _context_snippet(description, mention.bracket, mention.bracket + 1)
                 skipped.append((entry_id, context))
             elif mention.name == new_name:
                 unchanged += 1
