@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import textwrap
 
+import pytest
+
 ALEX = "arivera@example.edu"
 
 
@@ -81,11 +83,11 @@ def test_edit_description_ledger_records_replacement_size(sandbox):
         "--new",
         "45-minute talk of",
     )
-    final = len(_desc(sandbox, "2025-02-conference-talk").strip())
+    final = len(_desc(sandbox, "2025-02-conference-talk"))
     line = _ledger(sandbox)[-1]
     assert "edit-description" in line
     assert "2025-02-conference-talk" in line
-    assert f"old_chars=9 new_chars=17 chars={final}" in line
+    assert f"old_chars=9,new_chars=17,chars={final}" in line
 
 
 def test_edit_description_zero_matches_refused(sandbox):
@@ -432,3 +434,306 @@ def test_contact_update_handles_quoted_scalar_description(sandbox):
     )
     _, _, rc = sandbox.run("validate")
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# Write safety shared by the description writers
+# ---------------------------------------------------------------------------
+
+
+def _append_raw(sandbox, text: str) -> None:
+    """Append exact YAML text to the corpus (no re-indenting)."""
+    with open(sandbox.activities, "a", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def _others(sandbox, entry_id: str) -> list[dict]:
+    """Every parsed entry except ``entry_id``, in file order."""
+    return [e for e in sandbox.load_activities() if e.get("id") != entry_id]
+
+
+def _without_description(entry: dict) -> dict:
+    return {k: v for k, v in entry.items() if k != "description"}
+
+
+def _assert_only_description_changed(sandbox, entry_id, others_before, entry_before, expected):
+    """The file parses, the target's description is exactly ``expected``, and
+    nothing else (other entries, the target's other fields) moved."""
+    assert _others(sandbox, entry_id) == others_before
+    after = sandbox.entry(entry_id)
+    assert after["description"] == expected
+    assert _without_description(after) == _without_description(entry_before)
+
+
+def test_edit_description_counts_overlapping_matches(sandbox):
+    """Overlapping occurrences count separately, so the edit is ambiguous."""
+    _append(sandbox, _literal_entry("2026-03-fruit", "A banana split."))
+    _append(sandbox, _literal_entry("2026-03-part", "Completed Part III of the course."))
+    before = sandbox.activities.read_text()
+    out, _, rc = sandbox.run("edit-description", "2026-03-fruit", "--old", "ana", "--new", "XYZ")
+    assert rc == 1, out
+    assert "found 2" in out
+    out, _, rc = sandbox.run("edit-description", "2026-03-part", "--old", "II", "--new", "IV")
+    assert rc == 1, out
+    assert "found 2" in out
+    assert sandbox.activities.read_text() == before
+
+
+def test_edit_description_refuses_duplicate_id(sandbox):
+    """A target id that appears twice is refused rather than editing the wrong entry."""
+    _append(sandbox, _literal_entry("2026-03-dup", "First entry body unique-alpha."))
+    _append(sandbox, _literal_entry("2026-03-dup", "Second entry body."))
+    before = sandbox.activities.read_text()
+    ledger_before = _ledger(sandbox)
+    out, _, rc = sandbox.run(
+        "edit-description", "2026-03-dup", "--old", "unique-alpha", "--new", "unique-beta"
+    )
+    assert rc == 1, out
+    assert "2026-03-dup" in out and "2 times" in out
+    assert sandbox.activities.read_text() == before
+    assert _ledger(sandbox) == ledger_before
+
+
+def test_edit_description_ledger_details_survive_changes(sandbox):
+    """The ledger details carry no spaces, so `changes` shows all of them."""
+    sandbox.run(
+        "edit-description",
+        "2025-02-conference-talk",
+        "--old",
+        "30-minute",
+        "--new",
+        "45-minute talk of",
+    )
+    final = len(_desc(sandbox, "2025-02-conference-talk"))
+    out, _, rc = sandbox.run("changes", "--op", "edit-description")
+    assert rc == 0
+    assert f"old_chars=9,new_chars=17,chars={final}" in out
+
+
+@pytest.mark.parametrize(
+    "new",
+    ["a b", "a b", "a\u0085b", "a\rb", "a\x07b"],
+    ids=["U+2028", "U+2029", "U+0085", "bare-CR", "control-char"],
+)
+def test_edit_description_line_break_and_control_chars_round_trip(sandbox, new):
+    """Characters a literal block cannot hold never leave an unparseable file:
+    the value is written so that it reads back exactly."""
+    entry_before = sandbox.entry("2025-02-conference-talk")
+    others_before = _others(sandbox, "2025-02-conference-talk")
+    out, _, rc = sandbox.run(
+        "edit-description", "2025-02-conference-talk", "--old", "30-minute", "--new", new
+    )
+    assert rc == 0, out
+    expected = entry_before["description"].replace("30-minute", new)
+    _assert_only_description_changed(
+        sandbox, "2025-02-conference-talk", others_before, entry_before, expected
+    )
+    _, _, rc = sandbox.run("validate")
+    assert rc == 0
+
+
+def test_update_description_refuses_a_write_that_would_not_parse(sandbox):
+    """update-description keeps its literal-block output; when that output
+    cannot hold the text, the parse check refuses and nothing is written."""
+    before = sandbox.activities.read_text()
+    ledger_before = _ledger(sandbox)
+    out, _, rc = sandbox.run(
+        "update-description", "2025-02-conference-talk", stdin="first second\n"
+    )
+    assert rc == 1, out
+    assert "2025-02-conference-talk" in out
+    assert "Nothing was written" in out
+    assert sandbox.activities.read_text() == before
+    assert _ledger(sandbox) == ledger_before
+
+
+def test_verify_staged_write_rejects_a_broken_splice():
+    """The guard refuses text that does not parse, a changed neighbour, or a
+    description that reads back differently from the intended value."""
+    from librarian.cli import _verify_staged_write
+
+    before = [
+        "activities:\n",
+        "  - id: a-one\n",
+        "    description: |\n",
+        "      Old text.\n",
+        "  - id: a-two\n",
+        "    description: Neighbour.\n",
+    ]
+    good = list(before)
+    good[3] = "      New text.\n"
+    assert _verify_staged_write(before, good, {"a-one": "New text.\n"}) is None
+
+    unparseable = list(before)
+    unparseable[3] = "      New\n"
+    unparseable.insert(4, "text: [\n")
+    assert "a-one" in _verify_staged_write(before, unparseable, {"a-one": "New\n"})
+
+    wrong_value = list(good)
+    assert "a-one" in _verify_staged_write(before, wrong_value, {"a-one": "Other text.\n"})
+
+    neighbour = list(good)
+    neighbour[5] = "    description: Changed.\n"
+    assert "a-two" in _verify_staged_write(before, neighbour, {"a-one": "New text.\n"})
+
+    dropped = good[:4]
+    assert _verify_staged_write(before, dropped, {"a-one": "New text.\n"}) is not None
+
+
+def test_edit_description_writes_the_real_description_not_a_block_line(sandbox):
+    """A block line that starts with ``description:`` is not the description."""
+    _append_raw(
+        sandbox,
+        "\n  - id: 2026-03-blockfirst\n"
+        "    date: '2026-03-02'\n"
+        "    title: Block first\n"
+        "    ptr:\n"
+        "      category: teaching\n"
+        "      subcategory: advising\n"
+        "      notes: |\n"
+        "        description: this line is inside ptr.notes\n"
+        "    description: Met with Sam Okafor later.\n"
+        "    tags:\n"
+        "      - sample\n",
+    )
+    entry_before = sandbox.entry("2026-03-blockfirst")
+    others_before = _others(sandbox, "2026-03-blockfirst")
+    out, _, rc = sandbox.run(
+        "edit-description", "2026-03-blockfirst", "--old", "later", "--new", "afterwards"
+    )
+    assert rc == 0, out
+    _assert_only_description_changed(
+        sandbox,
+        "2026-03-blockfirst",
+        others_before,
+        entry_before,
+        "Met with Sam Okafor afterwards.",
+    )
+
+
+@pytest.mark.parametrize(
+    "stored, value",
+    [
+        (
+            '    description: "Met Alex Rivera on site\n    and approved in May."\n',
+            "Met Alex Rivera on site and approved in May.",
+        ),
+        (
+            "    description: 'Met Alex Rivera on site\n    and approved in May.'\n",
+            "Met Alex Rivera on site and approved in May.",
+        ),
+    ],
+    ids=["double-quoted", "single-quoted"],
+)
+def test_edit_description_multiline_quoted_continuation_at_field_indent(sandbox, stored, value):
+    """A quoted description whose continuation line sits at the field's own
+    indent is replaced whole, so no stray tail is left behind."""
+    _append_raw(
+        sandbox,
+        "\n  - id: 2026-03-quoted-ml\n"
+        "    date: '2026-03-03'\n"
+        "    title: Multi-line quoted\n" + stored + "    tags:\n      - sample\n",
+    )
+    entry_before = sandbox.entry("2026-03-quoted-ml")
+    assert entry_before["description"] == value
+    others_before = _others(sandbox, "2026-03-quoted-ml")
+    out, _, rc = sandbox.run(
+        "edit-description", "2026-03-quoted-ml", "--old", "in May", "--new", "in June"
+    )
+    assert rc == 0, out
+    _assert_only_description_changed(
+        sandbox,
+        "2026-03-quoted-ml",
+        others_before,
+        entry_before,
+        value.replace("in May", "in June"),
+    )
+
+
+def _last_field_entry() -> str:
+    return (
+        "\n  - id: 2026-03-lastfield\n"
+        "    date: '2026-03-04'\n"
+        "    title: Description is the last field\n"
+        "    tags:\n"
+        "      - sample\n"
+        "    description: |\n"
+        "      Description at the end.\n"
+        "\n"
+        "  # A comment that belongs before the next entry.\n"
+        "  - id: 2026-03-after\n"
+        "    date: '2026-03-05'\n"
+        "    title: After\n"
+        "    description: Untouched neighbour.\n"
+    )
+
+
+@pytest.mark.parametrize("command", ["edit-description", "update-description"])
+def test_description_as_last_field_keeps_blank_separator(sandbox, command):
+    """The blank line between the entry and the next one survives the splice."""
+    _append_raw(sandbox, _last_field_entry())
+    if command == "edit-description":
+        out, _, rc = sandbox.run(
+            command, "2026-03-lastfield", "--old", "at the end", "--new", "at the very end"
+        )
+    else:
+        out, _, rc = sandbox.run(command, "2026-03-lastfield", stdin="Description at the very end.")
+    assert rc == 0, out
+    text = sandbox.activities.read_text()
+    assert (
+        "      Description at the very end.\n"
+        "\n"
+        "  # A comment that belongs before the next entry.\n"
+        "  - id: 2026-03-after\n"
+    ) in text
+    assert sandbox.entry("2026-03-after")["description"] == "Untouched neighbour."
+
+
+def test_edit_description_keeps_whitespace_outside_the_edit(sandbox):
+    """Trailing spaces, trailing blank lines and a leading-space first line
+    outside the edited passage are kept exactly."""
+    _append_raw(
+        sandbox,
+        "\n  - id: 2026-03-ws\n"
+        "    date: '2026-03-06'\n"
+        "    title: Whitespace\n"
+        '    description: "  Indented first.  \\n\\nNext line with typo.\\n\\n"\n'
+        "    tags:\n"
+        "      - sample\n",
+    )
+    entry_before = sandbox.entry("2026-03-ws")
+    others_before = _others(sandbox, "2026-03-ws")
+    out, _, rc = sandbox.run("edit-description", "2026-03-ws", "--old", "typo", "--new", "fix")
+    assert rc == 0, out
+    _assert_only_description_changed(
+        sandbox,
+        "2026-03-ws",
+        others_before,
+        entry_before,
+        "  Indented first.  \n\nNext line with fix.\n\n",
+    )
+
+
+def test_edit_description_keeps_new_leading_space_and_missing_final_newline(sandbox):
+    """A replacement that starts the description with spaces is written as given,
+    and a description with no trailing newline does not gain one."""
+    _append(
+        sandbox,
+        """
+          - id: 2026-03-plain
+            date: '2026-03-07'
+            title: Plain
+            description: First words here.
+            tags:
+              - sample
+        """,
+    )
+    entry_before = sandbox.entry("2026-03-plain")
+    others_before = _others(sandbox, "2026-03-plain")
+    out, _, rc = sandbox.run(
+        "edit-description", "2026-03-plain", "--old", "First", "--new", "  First"
+    )
+    assert rc == 0, out
+    _assert_only_description_changed(
+        sandbox, "2026-03-plain", others_before, entry_before, "  First words here."
+    )

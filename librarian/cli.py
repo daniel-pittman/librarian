@@ -1967,37 +1967,177 @@ def cmd_update_field(ctx: Context, args: list[str]) -> int:
     return 1
 
 
-def _splice_description(lines: list[str], entry_id: str, new_desc: str) -> str | None:
-    """Replace one entry's description in ``lines`` with a literal block.
+def _parse_yaml_text(text: str):
+    """Parse YAML text exactly as :func:`load_activities` would read it from disk.
+
+    The file is read in text mode, which turns a bare ``\\r`` or ``\\r\\n``
+    into ``\\n``; parsing through the same newline translation makes an
+    in-memory check agree with the next real load.
+    """
+    return yaml.safe_load(io.StringIO(text, newline=None))
+
+
+def _literal_description_lines(value: str, indent: int) -> list[str]:
+    """Render ``value`` as a ``description:`` literal block at ``indent``.
+
+    The chomping indicator records the exact number of trailing newlines
+    (``|-`` none, ``|`` one, ``|+`` more), and an explicit indentation
+    indicator is added when the first non-empty line starts with a space,
+    since auto-detection would otherwise treat those spaces as indentation.
+    The caller must still check that the result reads back: a literal block
+    cannot hold other line breaks (``\\r``, U+0085, U+2028, U+2029) or
+    non-printable characters.
+    """
+    pad = " " * indent
+    body = value.rstrip("\n")
+    trailing = len(value) - len(body)
+    chomp = "-" if trailing == 0 else ("" if trailing == 1 else "+")
+    rows = body.split("\n")
+    first = next((row for row in rows if row), "")
+    indicator = "2" if first.startswith(" ") else ""
+    out = [f"{pad}description: |{indicator}{chomp}\n"]
+    out.extend(f"{pad}  {row}\n" if row else "\n" for row in rows)
+    out.extend("\n" for _ in range(trailing - 1))
+    return out
+
+
+def _description_reads_back(rendered: list[str], following: list[str], value: str) -> bool:
+    """True if ``rendered`` parses back to exactly ``value`` in its context.
+
+    The blank lines that will follow the field are included, because a
+    ``|+`` block would absorb them into the value.
+    """
+    blanks = []
+    for line in following:
+        if line.strip():
+            break
+        blanks.append(line)
+    pad = rendered[0][: line_indent(rendered[0])]
+    probe = "".join(rendered + blanks) + f"{pad}_end: 0\n"
+    try:
+        parsed = _parse_yaml_text(probe)
+    except yaml.YAMLError:
+        return False
+    return (
+        isinstance(parsed, dict)
+        and list(parsed) == ["description", "_end"]
+        and (parsed["description"] == value)
+    )
+
+
+def _render_description(value: str, indent: int, following: list[str]) -> list[str] | None:
+    """Render ``value`` losslessly: a literal block when it can hold the text,
+    else a single-line double-quoted scalar. ``None`` if neither reads back."""
+    literal = _literal_description_lines(value, indent)
+    if _description_reads_back(literal, following, value):
+        return literal
+    quoted = yaml.dump(value, default_style='"', allow_unicode=True, width=float("inf"))
+    rendered = [f"{' ' * indent}description: {quoted.rstrip(chr(10))}\n"]
+    if _description_reads_back(rendered, following, value):
+        return rendered
+    return None
+
+
+def _legacy_description_lines(new_desc: str, indent: int) -> list[str]:
+    """``update-description``'s output: a clip literal block with trailing
+    whitespace dropped from each line (see :func:`_legacy_description_value`)."""
+    pad = " " * indent
+    return [f"{pad}description: |\n"] + [
+        f"{pad}  {line.rstrip()}\n" for line in new_desc.split("\n")
+    ]
+
+
+def _legacy_description_value(new_desc: str) -> str:
+    """The value :func:`_legacy_description_lines` is meant to read back as."""
+    return "\n".join(line.rstrip() for line in new_desc.split("\n")) + "\n"
+
+
+def _splice_description(
+    lines: list[str], entry_id: str, new_desc: str, *, legacy: bool = False
+) -> str | None:
+    """Replace one entry's description in ``lines``.
 
     Shared by every description writer. Mutates ``lines`` in place and returns
-    ``None`` on success, or an error message (entry or description field
-    missing) with ``lines`` untouched. The caller owns reading, writing and
-    the ledger. Whatever scalar style the old description used, the new one is
-    always ``description: |`` at the field's own indent; trailing whitespace on
-    each line is dropped.
+    ``None`` on success, or an error message with ``lines`` untouched. The
+    caller owns reading, writing, the :func:`_verify_staged_write` check and
+    the ledger.
+
+    The field is found at the entry's own field indent (a block line that
+    happens to start with ``description:`` is not it), and its extent is
+    quote-aware, so a quoted scalar continuing at the field's indent is
+    replaced whole. Blank lines after the scalar stay, keeping the separator
+    before the next entry. By default the value is rendered losslessly
+    (:func:`_render_description`); ``legacy=True`` keeps
+    ``update-description``'s literal-block output.
     """
     start, end = find_entry_line_range(lines, entry_id)
     if start is None:
         return f"entry '{entry_id}' not found"
-    desc_start = _find_field_line(lines, start, end, "description")
+    desc_start = _find_entry_field_line(lines, start, end, "description")
     if desc_start is None:
         return f"no description field in entry '{entry_id}'"
+    desc_end = _scalar_end(lines, desc_start, "description", end)
+    while desc_end - 1 > desc_start and not lines[desc_end - 1].strip():
+        desc_end -= 1
 
-    # The description block runs until the next line at the same indent or less.
-    desc_indent = line_indent(lines[desc_start])
-    desc_end = end
-    for i in range(desc_start + 1, end):
-        if lines[i].strip() and line_indent(lines[i]) <= desc_indent:
-            desc_end = i
-            break
-
-    indent = " " * desc_indent
-    new_lines = [f"{indent}description: |\n"]
-    for line in new_desc.split("\n"):
-        new_lines.append(f"{indent}  {line.rstrip()}\n")
+    indent = line_indent(lines[desc_start])
+    if legacy:
+        new_lines = _legacy_description_lines(new_desc, indent)
+    else:
+        new_lines = _render_description(new_desc, indent, lines[desc_end:])
+        if new_lines is None:
+            return f"entry '{entry_id}': the new description cannot be written as YAML"
     lines[desc_start:desc_end] = new_lines
     return None
+
+
+def _verify_staged_write(
+    before: list[str], after: list[str], expected: dict[str, str]
+) -> str | None:
+    """Check staged file lines before they are written.
+
+    ``expected`` maps each touched entry id to the exact description it must
+    read back as. Returns ``None`` when the staged text parses, keeps the
+    same entry ids in the same order, gives each touched entry exactly its
+    intended description, and leaves everything else (other entries, the
+    touched entries' other fields, top-level keys) parse-equal to ``before``.
+    Otherwise returns a reason naming the entry, and the caller must write
+    nothing.
+    """
+    targets = ", ".join(f"'{eid}'" for eid in expected)
+    old_doc = _parse_yaml_text("".join(before)) or {}
+    try:
+        new_doc = _parse_yaml_text("".join(after)) or {}
+    except yaml.YAMLError as exc:
+        return f"editing {targets} would leave a file that does not parse ({type(exc).__name__})"
+    old_entries = old_doc.get("activities") or []
+    new_entries = new_doc.get("activities") if isinstance(new_doc, dict) else None
+    if not isinstance(new_entries, list):
+        return f"editing {targets} would leave no activities list"
+    old_ids = [e.get("id") if isinstance(e, dict) else None for e in old_entries]
+    new_ids = [e.get("id") if isinstance(e, dict) else None for e in new_entries]
+    if new_ids != old_ids:
+        return f"editing {targets} would change the entry ids or their order"
+    for eid in expected:
+        if old_ids.count(eid) != 1:
+            return f"entry id '{eid}' appears {old_ids.count(eid)} times"
+
+    for old_entry, new_entry, eid in zip(old_entries, new_entries, new_ids, strict=True):
+        if eid in expected:
+            got = new_entry.get("description")
+            if got != expected[eid]:
+                return f"entry '{eid}': the description would read back as {got!r:.120}"
+            if _without_key(new_entry, "description") != _without_key(old_entry, "description"):
+                return f"entry '{eid}': a field other than the description would change"
+        elif new_entry != old_entry:
+            return f"entry '{eid}' would change although it was not edited"
+    if _without_key(new_doc, "activities") != _without_key(old_doc, "activities"):
+        return f"editing {targets} would change the file outside its entries"
+    return None
+
+
+def _without_key(mapping: dict, key: str) -> dict:
+    return {k: v for k, v in mapping.items() if k != key}
 
 
 @_activities_locked
@@ -2019,9 +2159,14 @@ def cmd_update_description(ctx: Context, args: list[str]) -> int:
         return 1
 
     lines = read_lines(ctx.paths.activities)
-    error = _splice_description(lines, entry_id, new_desc)
+    before = list(lines)
+    error = _splice_description(lines, entry_id, new_desc, legacy=True)
     if error:
         print(f"ERROR: {error}")
+        return 1
+    error = _verify_staged_write(before, lines, {entry_id: _legacy_description_value(new_desc)})
+    if error:
+        print(f"ERROR: refusing to write: {error}. Nothing was written.")
         return 1
     write_lines(ctx.paths.activities, lines)
     append_ledger(ctx.paths.ledger, "update-description", entry_id, label, f"chars={len(new_desc)}")
@@ -2048,8 +2193,11 @@ def cmd_edit_description(ctx: Context, args: list[str]) -> int:
     ``edit-description <id> --old TEXT --new TEXT [--dry-run]``
 
     Refuses unless ``--old`` occurs exactly once in the description (the
-    count is reported). The rest of the description is left as it is; the
-    result is written as a literal block, as ``update-description`` does.
+    count, with overlapping occurrences counted separately, is reported).
+    Everything outside the passage, whitespace included, reads back exactly
+    as before: the value is written as a literal block, or as a double-quoted
+    scalar when a literal block cannot hold it. A duplicated entry id is
+    refused.
     ``--dry-run`` prints the passage with surrounding context and writes
     nothing (label is not required in this mode).
     """
@@ -2078,22 +2226,30 @@ def cmd_edit_description(ctx: Context, args: list[str]) -> int:
 
     entry_id, old, new = parsed.entry_id, parsed.old, parsed.new
     _, activities = load_activities(ctx.paths.activities)
-    entry = next((e for e in activities if e.get("id") == entry_id), None)
-    if entry is None:
+    matches = [e for e in activities if e.get("id") == entry_id]
+    if not matches:
         print(f"ERROR: entry '{entry_id}' not found")
         return 1
-    description = entry.get("description")
+    if len(matches) > 1:
+        print(
+            f"ERROR: entry id '{entry_id}' appears {len(matches)} times; "
+            "fix the duplicate (see `librarian validate`) before editing"
+        )
+        return 1
+    description = matches[0].get("description")
     if not isinstance(description, str) or not description:
         print(f"ERROR: no description field in entry '{entry_id}'")
         return 1
 
-    count = description.count(old)
+    # Overlapping occurrences count separately: "ana" occurs twice in "banana".
+    count = len(re.findall(f"(?={re.escape(old)})", description))
     if count != 1:
         print(f"ERROR: --old must occur exactly once in '{entry_id}' (found {count})")
         return 1
     pos = description.index(old)
-    final = (description[:pos] + new + description[pos + len(old) :]).strip()
-    if not final:
+    # Exactly the edited passage changes; whitespace elsewhere is kept.
+    final = description[:pos] + new + description[pos + len(old) :]
+    if not final.strip():
         print("ERROR: edit would leave an empty description")
         return 1
 
@@ -2104,17 +2260,21 @@ def cmd_edit_description(ctx: Context, args: list[str]) -> int:
         return 0
 
     lines = read_lines(ctx.paths.activities)
-    error = _splice_description(lines, entry_id, final)
+    before = list(lines)
+    error = _splice_description(lines, entry_id, final) or _verify_staged_write(
+        before, lines, {entry_id: final}
+    )
     if error:
-        print(f"ERROR: {error}")
+        print(f"ERROR: refusing to write: {error}. Nothing was written.")
         return 1
     write_lines(ctx.paths.activities, lines)
+    # `changes` keeps only the text up to the first space, so no spaces here.
     append_ledger(
         ctx.paths.ledger,
         "edit-description",
         entry_id,
         label,
-        f"old_chars={len(old)} new_chars={len(new)} chars={len(final)}",
+        f"old_chars={len(old)},new_chars={len(new)},chars={len(final)}",
     )
     print(f"Edited description on '{entry_id}' ({len(final)} chars)")
     return 0
@@ -2237,7 +2397,7 @@ def _scalar_end(lines: list[str], idx: int, key: str, limit: int) -> int:
     Handles quoted scalars that continue across lines by tracking quote state,
     so a low-indent continuation line is not mistaken for a sibling field.
     """
-    value_part = lines[idx].split(f"{key}:", 1)[1].lstrip()
+    value_part = re.split(rf"{re.escape(key)}\s*:", lines[idx], maxsplit=1)[1].lstrip()
     quote = value_part[0] if value_part[:1] in ("'", '"') else None
 
     def closes(text: str, qchar: str) -> bool:
