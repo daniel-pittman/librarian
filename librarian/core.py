@@ -9,6 +9,7 @@ keeps :mod:`librarian.cli` focused on argument parsing and I/O.
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
 
 import yaml
 
@@ -765,6 +766,51 @@ def extract_contacts(activities: list[dict]) -> dict[str, dict]:
             if eid not in record["sources"]:
                 record["sources"].append(eid)
     return contacts
+
+
+class ContactMention(NamedTuple):
+    """One ``Name (email`` mention of a given email inside a description.
+
+    ``name`` is the string :func:`extract_contacts` derives for the mention
+    (empty when it finds no two-word name). ``start`` / ``end`` delimit that
+    string in the description, immediately before the opening bracket; both
+    are ``None`` when the name is empty or is not found contiguous and
+    directly before the bracket, meaning the mention cannot be rewritten
+    safely. ``bracket`` is the index of the ``(`` or ``<``.
+    """
+
+    start: int | None
+    end: int | None
+    name: str
+    bracket: int
+
+
+def find_contact_mentions(description: str, email: str) -> list[ContactMention]:
+    """Locate every ``Name (email`` mention of ``email`` in ``description``.
+
+    Pure and I/O-free. The email match is case-insensitive and uses the same
+    wrapped-email pattern and name walk-back as :func:`extract_contacts`, so a
+    span returned here is exactly the name text the rolodex derives. Only the
+    text directly before the bracket (whitespace allowed between) is ever
+    reported as a span; text elsewhere is never part of a mention.
+    """
+    wanted = email.strip().lower()
+    mentions: list[ContactMention] = []
+    for match in _WRAPPED_EMAIL_RE.finditer(description):
+        if match.group(1).strip().rstrip(".,;:").lower() != wanted:
+            continue
+        bracket = match.start()
+        name = _walk_back_for_name(description, bracket)
+        if len(name.split()) < 2:
+            mentions.append(ContactMention(None, None, "", bracket))
+            continue
+        end = len(description[:bracket].rstrip())
+        start = end - len(name)
+        if start < 0 or description[start:end] != name:
+            mentions.append(ContactMention(None, None, name, bracket))
+            continue
+        mentions.append(ContactMention(start, end, name, bracket))
+    return mentions
 
 
 def canonical_name(names: set[str]) -> str:

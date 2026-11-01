@@ -577,6 +577,44 @@ def librarian_update_description(entry_id: str, new_description: str, session_la
 
 
 @mcp.tool()
+def librarian_edit_description(
+    entry_id: str, old: str, new: str, session_label: str, dry_run: bool = False
+) -> str:
+    """Replace one exact passage in an entry's description.
+
+    Refuses unless `old` occurs exactly once (the error reports the count);
+    the rest of the description is untouched. `dry_run=True` previews the
+    passage with context and writes nothing.
+    """
+    label = _validate_label(session_label)
+    # The "--flag=value" form keeps a value that starts with "-" from being
+    # read as another option.
+    args = ["edit-description", entry_id, f"--old={old}", f"--new={new}"]
+    if dry_run:
+        args.append("--dry-run")
+    return _out(_run_cli(args, extra_env={"LIBRARIAN_SESSION_LABEL": label}))
+
+
+@mcp.tool()
+def librarian_contact_update(
+    email: str, name: str, session_label: str, confirm: bool = False
+) -> str:
+    """Rename a contact in every `Name (email)` mention of one email address.
+
+    Requires confirm=True to write; otherwise returns a dry-run preview of each
+    mention's before and after. Only the name text directly before the
+    bracket changes, and the derived name includes any title ("Dr."), so
+    include it in `name` to keep it. Mentions that cannot be rewritten
+    safely are listed and left untouched.
+    """
+    label = _validate_label(session_label)
+    args = ["contact-update", email, f"--name={name}"]
+    if confirm:
+        args.append("--confirm")
+    return _out(_run_cli(args, extra_env={"LIBRARIAN_SESSION_LABEL": label}))
+
+
+@mcp.tool()
 def librarian_update_notes(
     entry_id: str, new_notes: str, session_label: str, block: str = "", field: str = "notes"
 ) -> str:

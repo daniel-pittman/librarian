@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from librarian.core import extract_contacts, rollup_entries, scan_dangling_refs
+from librarian.core import (
+    extract_contacts,
+    find_contact_mentions,
+    rollup_entries,
+    scan_dangling_refs,
+)
 
 
 def _entry(eid: str, **fields) -> dict:
@@ -1051,3 +1056,68 @@ def test_extract_contacts_case_d_clear_preserves_collected_name_suffixes():
         assert any("III" in n for n in names), (
             f"III suffix should be preserved through Case D's clear; got {names}"
         )
+
+
+# ---------------------------------------------------------------------------
+# find_contact_mentions — pure span location for contact-update
+# ---------------------------------------------------------------------------
+
+
+def test_find_contact_mentions_returns_name_span():
+    """The span covers exactly the derived name, directly before the bracket."""
+    desc = "Lead: Alexandra Rivera (arivera@example.edu) and Pat Lee."
+    (m,) = find_contact_mentions(desc, "arivera@example.edu")
+    assert m.name == "Alexandra Rivera"
+    assert desc[m.start : m.end] == "Alexandra Rivera"
+    assert desc[m.end :].startswith(" (arivera@example.edu)")
+
+
+def test_find_contact_mentions_includes_title_and_angle_brackets():
+    desc = "Thanks to Dr. Alexandra Rivera <arivera@example.edu>."
+    (m,) = find_contact_mentions(desc, "arivera@example.edu")
+    assert m.name == "Dr. Alexandra Rivera"
+    assert desc[m.start : m.end] == "Dr. Alexandra Rivera"
+
+
+def test_find_contact_mentions_email_match_is_case_insensitive():
+    desc = "Alexandra Rivera (ARivera@Example.EDU)"
+    (m,) = find_contact_mentions(desc, "arivera@example.edu")
+    assert desc[m.start : m.end] == "Alexandra Rivera"
+
+
+def test_find_contact_mentions_ignores_other_emails_and_unwrapped_mentions():
+    desc = "Pat Lee (plee@example.edu) wrote to arivera@example.edu directly."
+    assert find_contact_mentions(desc, "arivera@example.edu") == []
+
+
+def test_find_contact_mentions_finds_each_mention_in_order():
+    desc = "Alexandra Rivera (arivera@example.edu), then Alexandra Rivera <arivera@example.edu>."
+    first, second = find_contact_mentions(desc, "arivera@example.edu")
+    assert first.start < second.start
+    assert desc[first.start : first.end] == desc[second.start : second.end]
+
+
+def test_find_contact_mentions_no_name_is_unlocatable():
+    """No two-word name before the bracket: reported with no span."""
+    desc = "Ask the front desk (arivera@example.edu)."
+    (m,) = find_contact_mentions(desc, "arivera@example.edu")
+    assert (m.start, m.end, m.name) == (None, None, "")
+    assert desc[m.bracket] == "("
+
+
+def test_find_contact_mentions_name_not_contiguous_is_unlocatable():
+    """Punctuation or doubled spacing inside the name means the derived string
+    is not present verbatim, so the mention is not rewritten."""
+    for desc in (
+        "Alexandra,  Rivera (arivera@example.edu)",
+        "Alexandra  Rivera (arivera@example.edu)",
+    ):
+        (m,) = find_contact_mentions(desc, "arivera@example.edu")
+        assert m.start is None and m.end is None
+        assert m.name == "Alexandra Rivera"
+
+
+def test_find_contact_mentions_allows_whitespace_before_bracket():
+    desc = "Alexandra Rivera   (arivera@example.edu)"
+    (m,) = find_contact_mentions(desc, "arivera@example.edu")
+    assert desc[m.start : m.end] == "Alexandra Rivera"

@@ -42,6 +42,7 @@ from .core import (
     canonical_name,
     extract_contacts,
     filter_entries,
+    find_contact_mentions,
     rollup_entries,
     scan_dangling_refs,
     similarity_score,
@@ -1966,6 +1967,39 @@ def cmd_update_field(ctx: Context, args: list[str]) -> int:
     return 1
 
 
+def _splice_description(lines: list[str], entry_id: str, new_desc: str) -> str | None:
+    """Replace one entry's description in ``lines`` with a literal block.
+
+    Shared by every description writer. Mutates ``lines`` in place and returns
+    ``None`` on success, or an error message (entry or description field
+    missing) with ``lines`` untouched. The caller owns reading, writing and
+    the ledger. Whatever scalar style the old description used, the new one is
+    always ``description: |`` at the field's own indent; trailing whitespace on
+    each line is dropped.
+    """
+    start, end = find_entry_line_range(lines, entry_id)
+    if start is None:
+        return f"entry '{entry_id}' not found"
+    desc_start = _find_field_line(lines, start, end, "description")
+    if desc_start is None:
+        return f"no description field in entry '{entry_id}'"
+
+    # The description block runs until the next line at the same indent or less.
+    desc_indent = line_indent(lines[desc_start])
+    desc_end = end
+    for i in range(desc_start + 1, end):
+        if lines[i].strip() and line_indent(lines[i]) <= desc_indent:
+            desc_end = i
+            break
+
+    indent = " " * desc_indent
+    new_lines = [f"{indent}description: |\n"]
+    for line in new_desc.split("\n"):
+        new_lines.append(f"{indent}  {line.rstrip()}\n")
+    lines[desc_start:desc_end] = new_lines
+    return None
+
+
 @_activities_locked
 def cmd_update_description(ctx: Context, args: list[str]) -> int:
     """Replace an entry's description (read from stdin). ``update-description <id>``"""
@@ -1985,31 +2019,215 @@ def cmd_update_description(ctx: Context, args: list[str]) -> int:
         return 1
 
     lines = read_lines(ctx.paths.activities)
-    start, end = find_entry_line_range(lines, entry_id)
-    if start is None:
-        print(f"ERROR: entry '{entry_id}' not found")
+    error = _splice_description(lines, entry_id, new_desc)
+    if error:
+        print(f"ERROR: {error}")
         return 1
-    desc_start = _find_field_line(lines, start, end, "description")
-    if desc_start is None:
-        print(f"ERROR: no description field in entry '{entry_id}'")
-        return 1
-
-    # The description block runs until the next line at the same indent or less.
-    desc_indent = line_indent(lines[desc_start])
-    desc_end = end
-    for i in range(desc_start + 1, end):
-        if lines[i].strip() and line_indent(lines[i]) <= desc_indent:
-            desc_end = i
-            break
-
-    indent = " " * desc_indent
-    new_lines = [f"{indent}description: |\n"]
-    for line in new_desc.split("\n"):
-        new_lines.append(f"{indent}  {line.rstrip()}\n")
-    lines[desc_start:desc_end] = new_lines
     write_lines(ctx.paths.activities, lines)
     append_ledger(ctx.paths.ledger, "update-description", entry_id, label, f"chars={len(new_desc)}")
     print(f"Updated description on '{entry_id}' ({len(new_desc)} chars)")
+    return 0
+
+
+def _context_snippet(text: str, start: int, end: int, replacement: str | None = None) -> str:
+    """Render ``text[start:end]`` with about 60 chars of context either side.
+
+    With ``replacement``, the span is shown as that text instead. Newlines
+    are shown as a literal backslash-n so the snippet stays on one line.
+    """
+    span = text[start:end] if replacement is None else replacement
+    before = text[max(0, start - 60) : start]
+    after = text[end : end + 60]
+    return f"...{before}[{span}]{after}...".replace("\n", "\\n")
+
+
+@_activities_locked
+def cmd_edit_description(ctx: Context, args: list[str]) -> int:
+    """Replace one exact passage in an entry's description.
+
+    ``edit-description <id> --old TEXT --new TEXT [--dry-run]``
+
+    Refuses unless ``--old`` occurs exactly once in the description (the
+    count is reported). The rest of the description is left as it is; the
+    result is written as a literal block, as ``update-description`` does.
+    ``--dry-run`` prints the passage with surrounding context and writes
+    nothing (label is not required in this mode).
+    """
+    # A dry-run never writes and is not gated by the label requirement; the
+    # write path re-checks the label after argparse.
+    label = _resolve_label(args, required=False)
+    parser = argparse.ArgumentParser(prog="librarian edit-description")
+    parser.add_argument("entry_id")
+    parser.add_argument("--old", required=True, help="exact text to replace (must occur once)")
+    parser.add_argument("--new", required=True, help="replacement text")
+    parser.add_argument("--dry-run", action="store_true")
+    try:
+        parsed = parser.parse_args(args)
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 1
+    if not parsed.dry_run and not label:
+        print(
+            "ERROR: write operations require --label LABEL or the "
+            "LIBRARIAN_SESSION_LABEL env var.\n"
+            "       Format: <context>:<short-purpose>, e.g. 'cli:main-curator'"
+        )
+        return 1
+    if not parsed.old:
+        print("ERROR: --old must not be empty")
+        return 1
+
+    entry_id, old, new = parsed.entry_id, parsed.old, parsed.new
+    _, activities = load_activities(ctx.paths.activities)
+    entry = next((e for e in activities if e.get("id") == entry_id), None)
+    if entry is None:
+        print(f"ERROR: entry '{entry_id}' not found")
+        return 1
+    description = entry.get("description")
+    if not isinstance(description, str) or not description:
+        print(f"ERROR: no description field in entry '{entry_id}'")
+        return 1
+
+    count = description.count(old)
+    if count != 1:
+        print(f"ERROR: --old must occur exactly once in '{entry_id}' (found {count})")
+        return 1
+    pos = description.index(old)
+    final = (description[:pos] + new + description[pos + len(old) :]).strip()
+    if not final:
+        print("ERROR: edit would leave an empty description")
+        return 1
+
+    if parsed.dry_run:
+        print(f"Dry run: would edit '{entry_id}':")
+        print(f"  before: {_context_snippet(description, pos, pos + len(old))}")
+        print(f"  after:  {_context_snippet(description, pos, pos + len(old), new)}")
+        return 0
+
+    lines = read_lines(ctx.paths.activities)
+    error = _splice_description(lines, entry_id, final)
+    if error:
+        print(f"ERROR: {error}")
+        return 1
+    write_lines(ctx.paths.activities, lines)
+    append_ledger(
+        ctx.paths.ledger,
+        "edit-description",
+        entry_id,
+        label,
+        f"old_chars={len(old)} new_chars={len(new)} chars={len(final)}",
+    )
+    print(f"Edited description on '{entry_id}' ({len(final)} chars)")
+    return 0
+
+
+@_activities_locked
+def cmd_contact_update(ctx: Context, args: list[str]) -> int:
+    """Rename a contact in every ``Name (email)`` mention of one email address.
+
+    ``contact-update <email> --name "NEW NAME" [--confirm]`` (dry-run default).
+
+    Rewrites only the name text the rolodex derives for that email, directly
+    before the opening bracket, in every entry's description. Bylines,
+    citations and prose mentions without the email are never touched. The
+    derived name includes any title (``Dr. Alex Rivera`` is replaced whole), so
+    include the title in NEW NAME to keep it. Mentions whose name cannot be
+    located safely are listed and left as they are. ``--confirm`` writes (label
+    required), with one ledger line per changed entry; ``--dry-run`` wins over
+    ``--confirm``.
+    """
+    # Dry runs never write, so the label is only enforced with --confirm.
+    label = _resolve_label(args, required=False)
+    parser = argparse.ArgumentParser(prog="librarian contact-update")
+    parser.add_argument("email")
+    parser.add_argument("--name", required=True, help="the new name text")
+    parser.add_argument("--confirm", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    try:
+        parsed = parser.parse_args(args)
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 1
+    # --dry-run wins over --confirm, as in merge.
+    if parsed.dry_run:
+        parsed.confirm = False
+    if parsed.confirm and not label:
+        print(
+            "ERROR: write operations require --label LABEL or the "
+            "LIBRARIAN_SESSION_LABEL env var.\n"
+            "       Format: <context>:<short-purpose>, e.g. 'cli:main-curator'"
+        )
+        return 1
+
+    email, new_name = parsed.email, parsed.name.strip()
+    # The rolodex only reads back names of two or more words, so a shorter
+    # name would drop the contact from `contact` after the rewrite.
+    if len(new_name.split()) < 2 or "\n" in new_name:
+        print("ERROR: --name must be a single line of two or more words")
+        return 1
+
+    _, activities = load_activities(ctx.paths.activities)
+    # entry id -> (new description, mentions changed)
+    rewrites: dict[str, tuple[str, int]] = {}
+    unchanged = 0
+    skipped: list[tuple[str, str]] = []
+    found = False
+    for entry in activities:
+        description = entry.get("description")
+        if not isinstance(description, str):
+            continue
+        mentions = find_contact_mentions(description, email)
+        if not mentions:
+            continue
+        found = True
+        entry_id = entry.get("id", "?")
+        changed = []
+        for mention in mentions:
+            if mention.start is None or mention.end is None:
+                context = _context_snippet(description, mention.bracket, mention.bracket)
+                skipped.append((entry_id, context))
+            elif mention.name == new_name:
+                unchanged += 1
+                print(f"  {entry_id}: {mention.name} (unchanged)")
+            else:
+                changed.append(mention)
+                print(f"  {entry_id}: {mention.name} -> {new_name}")
+        if changed:
+            # Right to left, so earlier spans keep their offsets.
+            result = description
+            for mention in reversed(changed):
+                result = result[: mention.start] + new_name + result[mention.end :]
+            rewrites[entry_id] = (result, len(changed))
+
+    if not found:
+        print(f"ERROR: no 'Name ({email}' mention found in any entry")
+        return 1
+
+    if skipped:
+        print("\nSkipped (could not locate name safely):")
+        for entry_id, context in skipped:
+            print(f"  {entry_id}: {context}")
+    print(
+        f"\n{len(rewrites)} entries changed, {sum(n for _, n in rewrites.values())} "
+        f"mentions changed, {unchanged} unchanged, {len(skipped)} skipped"
+    )
+    if not rewrites:
+        print("Nothing to change.")
+        return 0
+    if not parsed.confirm:
+        print("\nDry run: pass --confirm to actually write.")
+        return 0
+
+    lines = read_lines(ctx.paths.activities)
+    for entry_id, (new_desc, _) in rewrites.items():
+        error = _splice_description(lines, entry_id, new_desc.strip())
+        if error:
+            print(f"ERROR: {error}; nothing written")
+            return 1
+    write_lines(ctx.paths.activities, lines)
+    for entry_id, (_, n) in rewrites.items():
+        append_ledger(
+            ctx.paths.ledger, "contact-update", entry_id, label, f"email={email} mentions={n}"
+        )
+    print(f"Updated {len(rewrites)} entries.")
     return 0
 
 
@@ -4130,6 +4348,8 @@ COMMANDS = {
     "delete": cmd_delete,
     "update-field": cmd_update_field,
     "update-description": cmd_update_description,
+    "edit-description": cmd_edit_description,
+    "contact-update": cmd_contact_update,
     "update-notes": cmd_update_notes,
     "update-nested-field": cmd_update_nested_field,
     "set-block": cmd_set_block,
