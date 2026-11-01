@@ -293,36 +293,47 @@ like `garcia@anywhere.com`).
 ### Fixing a contact
 
 The rolodex is derived, so a name is fixed in the descriptions that carry it.
-`contact-update` does that across the whole corpus in one step:
+`contact-update` does that across the whole corpus in one step. Name the text
+to replace with `--old-name` (run it without `--old-name` to list the names the
+rolodex derives for the email):
 
 ```bash
-librarian contact-update mgarcia@example.edu --name "Dr. Maria Garcia-Lopez"
-#   2024-grant-application: Dr. Maria Garcia -> Dr. Maria Garcia-Lopez
-#   2025-conference-poster: Dr. Maria Garcia -> Dr. Maria Garcia-Lopez
+librarian contact-update mgarcia@example.edu \
+  --old-name "Maria Garcia" --name "Maria Garcia-Lopez"
+#   2024-grant-application:
+#     before: ...Budget reviewed with Dr. [Maria Garcia] (mgarcia@example.edu)...
+#     after:  ...Budget reviewed with Dr. [Maria Garcia-Lopez] (mgarcia@example.edu)...
+#   2025-conference-poster:
+#     before: ...Met [Maria Garcia] (mgarcia@example.edu) at the poster session...
+#     after:  ...Met [Maria Garcia-Lopez] (mgarcia@example.edu) at the poster session...
 #
 # 2 entries changed, 2 mentions changed, 0 unchanged, 0 skipped
 #
 # Dry run: pass --confirm to actually write.
 
-librarian contact-update mgarcia@example.edu --name "Dr. Maria Garcia-Lopez" \
+librarian contact-update mgarcia@example.edu \
+  --old-name "Maria Garcia" --name "Maria Garcia-Lopez" \
   --confirm --label cli:fix-contact
 ```
 
 - It is a dry run until you pass `--confirm` (`--dry-run` wins over
   `--confirm`). A label is required only with `--confirm`.
-- Only the name text the rolodex derives, directly before the `(` or `<`, is
-  replaced. That derived name includes a title such as `Dr.`, so put the title
-  in `--name` to keep it. Bylines, citations, and prose mentions without the
-  email are never touched.
-- A mention whose name cannot be located safely (for example, the email has no
-  two-word name before it) is listed under "Skipped" and left as it is.
-- `--name` needs two or more words, because the rolodex skips shorter names
-  and the contact would disappear from `contact`.
-- Each changed entry gets one ledger line (`contact-update`, with the email
-  and mention count). The email is matched case-insensitively. An email with
-  no mentions anywhere exits 1.
-- Changed descriptions are rewritten as literal blocks, the same way
-  `update-description` writes them.
+- A mention is rewritten only when the text directly before its `(` or `<`
+  ends with `--old-name` at a word boundary, and only that text changes.
+  Anything before it (a verb such as "Met", a role such as "PI", a title such
+  as "Dr.", the previous sentence) stays as it is. Bylines, citations, and
+  prose mentions without the email are never touched.
+- A mention that already ends with `--name` is reported as unchanged, so
+  running the same rename twice changes nothing the second time. Any other
+  mention (for example `Maria Garcia, PhD (...)`, or the email with no name
+  before it) is listed under "Skipped" and left as it is.
+- The whole command is refused, writing nothing, when the rolodex could not
+  read `--name` back from a rewritten mention: it needs two to four
+  capitalised words, with no role word (Lead, Dean, ...) and no trailing
+  period. It is also refused when a changed entry's id appears more than once.
+- Each changed entry gets one ledger line (`contact-update`, with details like
+  `email=mgarcia@example.edu,mentions=1`). The email is matched
+  case-insensitively. An email with no mentions anywhere exits 1.
 
 For any other one-line fix, `edit-description` replaces a single passage
 without resending the whole description:
@@ -334,13 +345,23 @@ librarian edit-description 2025-conference-talk \
   --old "coordinated the" --new "organized the" --label cli:fix-typo
 ```
 
-`--old` must occur exactly once in the description; otherwise the command
-reports how many times it occurs and writes nothing. `--dry-run` shows the
-passage with about 60 characters of context either side and needs no label.
-The ledger line records `old_chars`, `new_chars` and the final length. Both
-commands are also MCP tools (`librarian_contact_update`,
-`librarian_edit_description`); `librarian_contact_update` takes `confirm`
-and is a dry run without it.
+`--old` must occur exactly once in the description, counting overlapping
+occurrences (`ana` occurs twice in `banana`); otherwise the command reports
+how many times it occurs and writes nothing. An entry id that appears more
+than once is refused. `--dry-run` shows the passage with about 60 characters
+of context either side and needs no label. The ledger line records
+`old_chars`, `new_chars` and the final length (`old_chars=9,new_chars=17,chars=189`).
+
+Both commands keep everything outside the edited text exactly, whitespace
+included: the description is written as a literal block, or as a
+double-quoted scalar when it holds characters a literal block cannot (such
+as U+2028). Before any description write (these two commands and
+`update-description`), the staged file is parsed and checked: the same
+entries in the same order, the exact intended description, and nothing else
+changed. If the check fails, nothing is written. Both commands are also MCP
+tools (`librarian_contact_update`, `librarian_edit_description`);
+`librarian_contact_update` takes `old_name` and `confirm` and is a dry run
+without `confirm`.
 
 ## The MCP server
 
