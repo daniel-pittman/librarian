@@ -597,18 +597,23 @@ def librarian_edit_description(
 
 @mcp.tool()
 def librarian_contact_update(
-    email: str, name: str, session_label: str, confirm: bool = False
+    email: str, old_name: str, name: str, session_label: str, confirm: bool = False
 ) -> str:
     """Rename a contact in every `Name (email)` mention of one email address.
 
-    Requires confirm=True to write; otherwise returns a dry-run preview of each
-    mention's before and after. Only the name text directly before the
-    bracket changes, and the derived name includes any title ("Dr."), so
-    include it in `name` to keep it. Mentions that cannot be rewritten
-    safely are listed and left untouched.
+    `old_name` is the current name text (see `librarian_contact`); a mention
+    is rewritten only when the text directly before its bracket ends with
+    it, and only that text changes, so a title or verb before it ("Dr.",
+    "Met") stays. Other mentions are listed as skipped. Requires
+    confirm=True to write; otherwise returns a dry-run preview. The whole
+    call is refused, writing nothing, if the rolodex could not read `name`
+    back (lowercase, more than four words, a role word, a trailing period)
+    or a changed entry's id is duplicated.
     """
     label = _validate_label(session_label)
-    args = ["contact-update", email, f"--name={name}"]
+    # The "--flag=value" form keeps a value that starts with "-" from being
+    # read as another option.
+    args = ["contact-update", email, f"--old-name={old_name}", f"--name={name}"]
     if confirm:
         args.append("--confirm")
     return _out(_run_cli(args, extra_env={"LIBRARIAN_SESSION_LABEL": label}))

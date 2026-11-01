@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from librarian.core import (
     extract_contacts,
-    find_contact_mentions,
+    find_name_mentions,
+    rename_contact,
     rollup_entries,
     scan_dangling_refs,
 )
@@ -1059,65 +1060,127 @@ def test_extract_contacts_case_d_clear_preserves_collected_name_suffixes():
 
 
 # ---------------------------------------------------------------------------
-# find_contact_mentions — pure span location for contact-update
+# find_name_mentions / rename_contact: pure planning for contact-update
 # ---------------------------------------------------------------------------
 
-
-def test_find_contact_mentions_returns_name_span():
-    """The span covers exactly the derived name, directly before the bracket."""
-    desc = "Lead: Alexandra Rivera (arivera@example.edu) and Pat Lee."
-    (m,) = find_contact_mentions(desc, "arivera@example.edu")
-    assert m.name == "Alexandra Rivera"
-    assert desc[m.start : m.end] == "Alexandra Rivera"
-    assert desc[m.end :].startswith(" (arivera@example.edu)")
+E = "arivera@example.edu"
 
 
-def test_find_contact_mentions_includes_title_and_angle_brackets():
-    desc = "Thanks to Dr. Alexandra Rivera <arivera@example.edu>."
-    (m,) = find_contact_mentions(desc, "arivera@example.edu")
-    assert m.name == "Dr. Alexandra Rivera"
-    assert desc[m.start : m.end] == "Dr. Alexandra Rivera"
+def _renamed(desc: str, old: str = "Alex Rivera", new: str = "Alexandra Rivera") -> str:
+    result = rename_contact(desc, E, old, new)
+    assert result.unreadable == []
+    return result.text
 
 
-def test_find_contact_mentions_email_match_is_case_insensitive():
-    desc = "Alexandra Rivera (ARivera@Example.EDU)"
-    (m,) = find_contact_mentions(desc, "arivera@example.edu")
-    assert desc[m.start : m.end] == "Alexandra Rivera"
+def test_rename_contact_keeps_lead_in_words():
+    """Only the old name's own text changes; a verb, role, title or the end
+    of the previous sentence before it stays byte-identical."""
+    cases = {
+        "Met Alex Rivera (arivera@example.edu) at the expo.": (
+            "Met Alexandra Rivera (arivera@example.edu) at the expo."
+        ),
+        "PI Alex Rivera (arivera@example.edu) leads the grant.": (
+            "PI Alexandra Rivera (arivera@example.edu) leads the grant."
+        ),
+        "Trip to Denver. Alex Rivera (arivera@example.edu) presented.": (
+            "Trip to Denver. Alexandra Rivera (arivera@example.edu) presented."
+        ),
+        "Met with Pat Lee. Alex Rivera (arivera@example.edu) also joined.": (
+            "Met with Pat Lee. Alexandra Rivera (arivera@example.edu) also joined."
+        ),
+        "Spoke with Dr. Alex Rivera (arivera@example.edu) about labs.": (
+            "Spoke with Dr. Alexandra Rivera (arivera@example.edu) about labs."
+        ),
+        "Collaborator Alex Rivera <arivera@example.edu> joined.": (
+            "Collaborator Alexandra Rivera <arivera@example.edu> joined."
+        ),
+    }
+    for before, after in cases.items():
+        assert _renamed(before) == after
 
 
-def test_find_contact_mentions_ignores_other_emails_and_unwrapped_mentions():
-    desc = "Pat Lee (plee@example.edu) wrote to arivera@example.edu directly."
-    assert find_contact_mentions(desc, "arivera@example.edu") == []
-
-
-def test_find_contact_mentions_finds_each_mention_in_order():
-    desc = "Alexandra Rivera (arivera@example.edu), then Alexandra Rivera <arivera@example.edu>."
-    first, second = find_contact_mentions(desc, "arivera@example.edu")
-    assert first.start < second.start
-    assert desc[first.start : first.end] == desc[second.start : second.end]
-
-
-def test_find_contact_mentions_no_name_is_unlocatable():
-    """No two-word name before the bracket: reported with no span."""
-    desc = "Ask the front desk (arivera@example.edu)."
-    (m,) = find_contact_mentions(desc, "arivera@example.edu")
-    assert (m.start, m.end, m.name) == (None, None, "")
+def test_rename_contact_skips_a_mention_not_ending_with_the_old_name():
+    desc = "Panel chaired by Alex Rivera, PhD (arivera@example.edu) this year."
+    result = rename_contact(desc, E, "Alex Rivera", "Alexandra Rivera")
+    assert result.text == desc
+    (m,) = result.mentions
+    assert (m.status, m.start, m.end) == ("skip", None, None)
     assert desc[m.bracket] == "("
 
 
-def test_find_contact_mentions_name_not_contiguous_is_unlocatable():
-    """Punctuation or doubled spacing inside the name means the derived string
-    is not present verbatim, so the mention is not rewritten."""
-    for desc in (
-        "Alexandra,  Rivera (arivera@example.edu)",
-        "Alexandra  Rivera (arivera@example.edu)",
-    ):
-        (m,) = find_contact_mentions(desc, "arivera@example.edu")
-        assert m.start is None and m.end is None
-        assert m.name == "Alexandra Rivera"
+def test_find_name_mentions_requires_a_word_boundary():
+    """``XAlex Rivera`` does not end with ``Alex Rivera`` at a word boundary."""
+    desc = "Met XAlex Rivera (arivera@example.edu)."
+    (m,) = find_name_mentions(desc, E, "Alex Rivera", "Alexandra Rivera")
+    assert m.status == "skip"
 
 
-def test_find_contact_mentions_allows_whitespace_before_bracket():
-    desc = "Alexandra Rivera   (arivera@example.edu)"
-    (m,) = find_contact_mentions(desc, "arivera@example.edu")
-    assert desc[m.start : m.end] == "Alexandra Rivera"
+def test_find_name_mentions_reports_the_tail_span():
+    desc = "Met Alex Rivera   (arivera@example.edu)."
+    (m,) = find_name_mentions(desc, E, "Alex Rivera", "Alexandra Rivera")
+    assert m.status == "change"
+    assert desc[m.start : m.end] == "Alex Rivera"
+
+
+def test_rename_contact_two_mentions_and_mixed_case_email():
+    desc = (
+        "Alex Rivera (ARivera@Example.EDU) opened; later Met Alex Rivera "
+        "<arivera@example.edu> closed."
+    )
+    assert _renamed(desc) == (
+        "Alexandra Rivera (ARivera@Example.EDU) opened; later Met Alexandra Rivera "
+        "<arivera@example.edu> closed."
+    )
+
+
+def test_rename_contact_leaves_bylines_and_other_emails_alone():
+    desc = "Authors: Alex Rivera, Pat Lee. Alex Rivera (other@example.edu) too."
+    result = rename_contact(desc, E, "Alex Rivera", "Alexandra Rivera")
+    assert result.text == desc
+    assert result.mentions == []
+
+
+def test_rename_contact_is_a_no_op_when_run_twice():
+    once = _renamed("Met Alex Rivera (arivera@example.edu).")
+    again = rename_contact(once, E, "Alex Rivera", "Alexandra Rivera")
+    assert again.text == once
+    assert [m.status for m in again.mentions] == ["unchanged"]
+
+
+def test_rename_contact_adding_a_title_does_not_stack_on_rerun():
+    """When the new name ends with the old one, an already-renamed mention
+    is unchanged rather than renamed again."""
+    once = _renamed("Met Alex Rivera (arivera@example.edu).", new="Dr. Alex Rivera")
+    assert once == "Met Dr. Alex Rivera (arivera@example.edu)."
+    again = rename_contact(once, E, "Alex Rivera", "Dr. Alex Rivera")
+    assert again.text == once
+    assert [m.status for m in again.mentions] == ["unchanged"]
+
+
+def test_rename_contact_dropping_a_title_rewrites_the_titled_mention():
+    """When the old name ends with the new one, the old (longer) name wins."""
+    desc = "Met Dr. Alex Rivera (arivera@example.edu); Alex Rivera <arivera@example.edu>."
+    result = rename_contact(desc, E, "Dr. Alex Rivera", "Alex Rivera")
+    assert (
+        result.text == "Met Alex Rivera (arivera@example.edu); Alex Rivera <arivera@example.edu>."
+    )
+    assert [m.status for m in result.mentions] == ["change", "unchanged"]
+
+
+def test_rename_contact_old_equals_new_changes_nothing():
+    desc = "Met Alex Rivera (arivera@example.edu)."
+    result = rename_contact(desc, E, "Alex Rivera", "Alex Rivera")
+    assert result.text == desc
+    assert [m.status for m in result.mentions] == ["unchanged"]
+
+
+def test_rename_contact_flags_names_the_rolodex_cannot_read_back():
+    """Lowercase, more than four words, a trailing period or a role word: the
+    rolodex would derive a different name after the rename."""
+    desc = "Met Alex Rivera (arivera@example.edu)."
+    for new in ("bell hooks", "Maria Elena de la Cruz", "Alex Rivera Jr.", "Alex Dean"):
+        result = rename_contact(desc, E, "Alex Rivera", new)
+        assert len(result.unreadable) == 1, new
+        mention, derived = result.unreadable[0]
+        assert mention.status == "change"
+        assert derived != new

@@ -42,7 +42,7 @@ from .core import (
     canonical_name,
     extract_contacts,
     filter_entries,
-    find_contact_mentions,
+    rename_contact,
     rollup_entries,
     scan_dangling_refs,
     similarity_score,
@@ -2284,21 +2284,26 @@ def cmd_edit_description(ctx: Context, args: list[str]) -> int:
 def cmd_contact_update(ctx: Context, args: list[str]) -> int:
     """Rename a contact in every ``Name (email)`` mention of one email address.
 
-    ``contact-update <email> --name "NEW NAME" [--confirm]`` (dry-run default).
+    ``contact-update <email> --old-name "OLD NAME" --name "NEW NAME" [--confirm]``
+    (dry-run default).
 
-    Rewrites only the name text the rolodex derives for that email, directly
-    before the opening bracket, in every entry's description. Bylines,
-    citations and prose mentions without the email are never touched. The
-    derived name includes any title (``Dr. Alex Rivera`` is replaced whole), so
-    include the title in NEW NAME to keep it. Mentions whose name cannot be
-    located safely are listed and left as they are. ``--confirm`` writes (label
-    required), with one ledger line per changed entry; ``--dry-run`` wins over
-    ``--confirm``.
+    A mention is rewritten only when the text directly before its bracket
+    ends with OLD NAME at a word boundary, and only that text changes: a
+    verb, role or title before the name (``Met``, ``PI``, ``Dr.``) and the
+    previous sentence stay as they are. Mentions that already end with NEW
+    NAME are unchanged; any other mention is listed as skipped. Bylines and
+    prose without the email are never touched. Without ``--old-name`` the
+    names the rolodex derives for the email are listed. The command refuses,
+    writing nothing, when the rolodex could not read NEW NAME back from a
+    rewritten mention, or when a changed entry's id is duplicated.
+    ``--confirm`` writes (label required), with one ledger line per changed
+    entry; ``--dry-run`` wins over ``--confirm``.
     """
     # Dry runs never write, so the label is only enforced with --confirm.
     label = _resolve_label(args, required=False)
     parser = argparse.ArgumentParser(prog="librarian contact-update")
     parser.add_argument("email")
+    parser.add_argument("--old-name", help="the current name text, as it appears before the email")
     parser.add_argument("--name", required=True, help="the new name text")
     parser.add_argument("--confirm", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -2317,52 +2322,96 @@ def cmd_contact_update(ctx: Context, args: list[str]) -> int:
         )
         return 1
 
-    email, new_name = parsed.email, parsed.name.strip()
-    # The rolodex only reads back names of two or more words, so a shorter
-    # name would drop the contact from `contact` after the rewrite.
-    if len(new_name.split()) < 2 or "\n" in new_name:
-        print("ERROR: --name must be a single line of two or more words")
+    email = parsed.email
+    _, activities = load_activities(ctx.paths.activities)
+    if parsed.old_name is None:
+        variants = sorted(
+            {
+                name
+                for key, record in extract_contacts(activities).items()
+                if key.lower() == email.strip().lower()
+                for name in record["names"]
+            }
+        )
+        print("ERROR: --old-name is required: the name text to replace, as it appears")
+        if variants:
+            print(f"       before the email. Names the rolodex derives for {email}:")
+            for name in variants:
+                print(f"         '{name}'")
+        else:
+            print(f"       before the email. The rolodex derives no name for {email}.")
         return 1
 
-    _, activities = load_activities(ctx.paths.activities)
+    # The rolodex only reads back names of two or more words.
+    for flag, value in (("--old-name", parsed.old_name), ("--name", parsed.name)):
+        if len(value.split()) < 2 or "\n" in value:
+            print(f"ERROR: {flag} must be a single line of two or more words")
+            return 1
+    old_name, new_name = parsed.old_name.strip(), parsed.name.strip()
+
     # entry id -> (new description, mentions changed)
     rewrites: dict[str, tuple[str, int]] = {}
+    report: list[str] = []
     unchanged = 0
     skipped: list[tuple[str, str]] = []
+    unreadable: list[tuple[str, str]] = []
     found = False
     for entry in activities:
         description = entry.get("description")
         if not isinstance(description, str):
             continue
-        mentions = find_contact_mentions(description, email)
-        if not mentions:
+        plan = rename_contact(description, email, old_name, new_name)
+        if not plan.mentions:
             continue
         found = True
         entry_id = entry.get("id", "?")
-        changed = []
-        for mention in mentions:
-            if mention.start is None or mention.end is None:
-                context = _context_snippet(description, mention.bracket, mention.bracket + 1)
-                skipped.append((entry_id, context))
-            elif mention.name == new_name:
+        changed = 0
+        for m in plan.mentions:
+            if m.status == "skip":
+                skipped.append((entry_id, _context_snippet(description, m.bracket, m.bracket + 1)))
+            elif m.status == "unchanged":
                 unchanged += 1
-                print(f"  {entry_id}: {mention.name} (unchanged)")
+                report.append(
+                    f"  {entry_id}: unchanged: {_context_snippet(description, m.start, m.end)}"
+                )
             else:
-                changed.append(mention)
-                print(f"  {entry_id}: {mention.name} -> {new_name}")
+                changed += 1
+                report.append(f"  {entry_id}:")
+                report.append(f"    before: {_context_snippet(description, m.start, m.end)}")
+                report.append(
+                    f"    after:  {_context_snippet(description, m.start, m.end, new_name)}"
+                )
+        unreadable += [(entry_id, derived) for _, derived in plan.unreadable]
         if changed:
-            # Right to left, so earlier spans keep their offsets.
-            result = description
-            for mention in reversed(changed):
-                result = result[: mention.start] + new_name + result[mention.end :]
-            rewrites[entry_id] = (result, len(changed))
+            rewrites[entry_id] = (plan.text, changed)
 
     if not found:
         print(f"ERROR: no 'Name ({email}' mention found in any entry")
         return 1
+    if unreadable:
+        print(f"ERROR: the rolodex cannot read the name '{new_name}' back after the rename:")
+        for entry_id, derived in unreadable:
+            print(f"  {entry_id}: it would derive '{derived}'")
+        print(
+            "Names need two to four capitalised words, with no role word (Lead, Dean, ...)\n"
+            "and no trailing period. Nothing was written."
+        )
+        return 1
+    id_counts: dict[str, int] = {}
+    for entry in activities:
+        id_counts[entry.get("id")] = id_counts.get(entry.get("id"), 0) + 1
+    duplicates = [entry_id for entry_id in rewrites if id_counts.get(entry_id, 0) > 1]
+    if duplicates:
+        print(
+            "ERROR: duplicate entry id(s) among the entries to change: "
+            f"{', '.join(duplicates)}. Fix them (see `librarian validate`); nothing was written."
+        )
+        return 1
 
+    for line in report:
+        print(line)
     if skipped:
-        print("\nSkipped (could not locate name safely):")
+        print("\nSkipped (does not end with the old or new name):")
         for entry_id, context in skipped:
             print(f"  {entry_id}: {context}")
     print(
@@ -2377,15 +2426,23 @@ def cmd_contact_update(ctx: Context, args: list[str]) -> int:
         return 0
 
     lines = read_lines(ctx.paths.activities)
+    before = list(lines)
     for entry_id, (new_desc, _) in rewrites.items():
-        error = _splice_description(lines, entry_id, new_desc.strip())
+        error = _splice_description(lines, entry_id, new_desc)
         if error:
-            print(f"ERROR: {error}; nothing written")
+            print(f"ERROR: {error}; nothing was written")
             return 1
+    error = _verify_staged_write(
+        before, lines, {entry_id: new_desc for entry_id, (new_desc, _) in rewrites.items()}
+    )
+    if error:
+        print(f"ERROR: refusing to write: {error}. Nothing was written.")
+        return 1
     write_lines(ctx.paths.activities, lines)
+    # `changes` keeps only the text up to the first space, so no spaces here.
     for entry_id, (_, n) in rewrites.items():
         append_ledger(
-            ctx.paths.ledger, "contact-update", entry_id, label, f"email={email} mentions={n}"
+            ctx.paths.ledger, "contact-update", entry_id, label, f"email={email},mentions={n}"
         )
     print(f"Updated {len(rewrites)} entries.")
     return 0

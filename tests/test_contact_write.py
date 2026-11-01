@@ -255,22 +255,25 @@ def _seed_alex(sandbox) -> None:
     )
 
 
+OLD = "Alexandra Rivera"
+
+
+def _cu(sandbox, *extra, old=OLD, new="Alex Rivera", **kw):
+    """Run contact-update for ALEX with --old-name/--name."""
+    return sandbox.run("contact-update", ALEX, "--old-name", old, "--name", new, *extra, **kw)
+
+
 def test_contact_update_dry_run_is_default(sandbox):
-    """Without --confirm nothing is written, and the preview lists each mention."""
+    """Without --confirm nothing is written, and the preview shows each mention."""
     _seed_alex(sandbox)
     activities_before = sandbox.activities.read_text()
     ledger_before = _ledger(sandbox)
-    out, _, rc = sandbox.run(
-        "contact-update",
-        ALEX,
-        "--name",
-        "Alex Rivera",
-        extra_env={"LIBRARIAN_SESSION_LABEL": ""},
-    )
+    out, _, rc = _cu(sandbox, extra_env={"LIBRARIAN_SESSION_LABEL": ""})
     assert rc == 0, out
-    assert "2026-02-alex-one: Dr. Alexandra Rivera -> Alex Rivera" in out
-    assert "2026-02-alex-two: Alexandra Rivera -> Alex Rivera" in out
-    assert "2026-02-alex-three: Alexandra Rivera -> Alex Rivera" in out
+    assert "2026-02-alex-one:" in out
+    assert "Dr. [Alexandra Rivera] (arivera@example.edu)" in out
+    assert "Dr. [Alex Rivera] (arivera@example.edu)" in out
+    assert "by [Alex Rivera] <arivera@example.edu>" in out
     assert "3 entries changed, 3 mentions changed, 0 unchanged, 0 skipped" in out
     assert "Dry run" in out
     assert sandbox.activities.read_text() == activities_before
@@ -280,22 +283,43 @@ def test_contact_update_dry_run_is_default(sandbox):
 def test_contact_update_dry_run_wins_over_confirm(sandbox):
     _seed_alex(sandbox)
     activities_before = sandbox.activities.read_text()
-    out, _, rc = sandbox.run(
-        "contact-update", ALEX, "--name", "Alex Rivera", "--confirm", "--dry-run"
-    )
+    ledger_before = _ledger(sandbox)
+    out, _, rc = _cu(sandbox, "--confirm", "--dry-run")
     assert rc == 0
     assert "Dry run" in out
+    assert sandbox.activities.read_text() == activities_before
+    assert _ledger(sandbox) == ledger_before
+
+
+def test_contact_update_requires_old_name_and_lists_variants(sandbox):
+    """Without --old-name the command lists the names the rolodex derives."""
+    _seed_alex(sandbox)
+    activities_before = sandbox.activities.read_text()
+    out, _, rc = sandbox.run("contact-update", ALEX, "--name", "Alex Rivera", "--confirm")
+    assert rc == 1, out
+    assert "--old-name" in out
+    assert "'Dr. Alexandra Rivera'" in out
+    assert "'Alexandra Rivera'" in out
+    assert sandbox.activities.read_text() == activities_before
+
+
+def test_contact_update_rejects_single_word_old_name(sandbox):
+    _seed_alex(sandbox)
+    activities_before = sandbox.activities.read_text()
+    out, _, rc = _cu(sandbox, "--confirm", old="Rivera")
+    assert rc == 1
+    assert "--old-name" in out and "two or more words" in out
     assert sandbox.activities.read_text() == activities_before
 
 
 def test_contact_update_confirm_rewrites_mentions_across_entries(sandbox):
-    """--confirm changes only the name spans, with one ledger line per entry."""
+    """--confirm changes only the old name's text, with one ledger line per entry."""
     _seed_alex(sandbox)
     ledger_before = _ledger(sandbox)
-    out, _, rc = sandbox.run("contact-update", ALEX, "--name", "Alex Rivera", "--confirm")
+    out, _, rc = _cu(sandbox, "--confirm")
     assert rc == 0, out
-    # A title prefix is part of the derived name and is replaced with it.
-    assert "Advised the capstone team. Alex Rivera (arivera@example.edu) signed off." in _desc(
+    # The title before the old name is not part of it and stays.
+    assert "Advised the capstone team. Dr. Alex Rivera (arivera@example.edu) signed off." in _desc(
         sandbox, "2026-02-alex-one"
     )
     two = _desc(sandbox, "2026-02-alex-two")
@@ -307,7 +331,7 @@ def test_contact_update_confirm_rewrites_mentions_across_entries(sandbox):
     new_lines = _ledger(sandbox)[len(ledger_before) :]
     assert len(new_lines) == 3
     assert all("contact-update" in line for line in new_lines)
-    assert all(f"email={ALEX} mentions=1" in line for line in new_lines)
+    assert all(f"email={ALEX},mentions=1" in line for line in new_lines)
     assert {
         e for line in new_lines for e in ("alex-one", "alex-two", "alex-three") if e in line
     } == {
@@ -324,32 +348,46 @@ def test_contact_update_confirm_rewrites_mentions_across_entries(sandbox):
     assert rc == 0
 
 
+def test_contact_update_keeps_lead_in_words(sandbox):
+    """A verb, role, title or the previous sentence before the name survives."""
+    cases = {
+        "2026-02-met": "Met Alexandra Rivera (arivera@example.edu) at the expo.",
+        "2026-02-pi": "PI Alexandra Rivera (arivera@example.edu) leads the grant.",
+        "2026-02-trip": "Trip to Denver. Alexandra Rivera (arivera@example.edu) presented.",
+        "2026-02-prev": "Met with Pat Lee. Alexandra Rivera (arivera@example.edu) also joined.",
+        "2026-02-dr": "Spoke with Dr. Alexandra Rivera (arivera@example.edu) about labs.",
+        "2026-02-phd": "Panel chaired by Alexandra Rivera, PhD (arivera@example.edu) this year.",
+    }
+    for entry_id, body in cases.items():
+        _append(sandbox, _literal_entry(entry_id, body))
+    out, _, rc = _cu(sandbox, "--confirm")
+    assert rc == 0, out
+    for entry_id, body in cases.items():
+        expected = body if entry_id == "2026-02-phd" else body.replace(OLD, "Alex Rivera")
+        assert _desc(sandbox, entry_id) == expected + "\n"
+    assert "Skipped" in out and "2026-02-phd" in out
+    assert "5 entries changed, 5 mentions changed, 0 unchanged, 1 skipped" in out
+
+
 def test_contact_update_confirm_requires_label(sandbox):
     _seed_alex(sandbox)
     activities_before = sandbox.activities.read_text()
-    out, _, rc = sandbox.run(
-        "contact-update",
-        ALEX,
-        "--name",
-        "Alex Rivera",
-        "--confirm",
-        extra_env={"LIBRARIAN_SESSION_LABEL": ""},
-    )
+    out, _, rc = _cu(sandbox, "--confirm", extra_env={"LIBRARIAN_SESSION_LABEL": ""})
     assert rc == 1
     assert "require --label" in out
     assert sandbox.activities.read_text() == activities_before
 
 
 def test_contact_update_skips_email_without_a_name(sandbox):
-    """A mention with no two-word name before it is reported and left untouched."""
+    """A mention with no name before it is reported and left untouched."""
     _seed_alex(sandbox)
     _append(
         sandbox,
         _literal_entry("2026-02-alex-bare", "Contact the office (arivera@example.edu) for access."),
     )
-    out, _, rc = sandbox.run("contact-update", ALEX, "--name", "Alex Rivera", "--confirm")
+    out, _, rc = _cu(sandbox, "--confirm")
     assert rc == 0, out
-    assert "Skipped (could not locate name safely)" in out
+    assert "Skipped (does not end with the old or new name)" in out
     assert "2026-02-alex-bare" in out
     assert "3 entries changed, 3 mentions changed, 0 unchanged, 1 skipped" in out
     assert _desc(sandbox, "2026-02-alex-bare").strip() == (
@@ -365,11 +403,50 @@ def test_contact_update_noop_when_name_already_matches(sandbox):
     )
     activities_before = sandbox.activities.read_text()
     ledger_before = _ledger(sandbox)
-    out, _, rc = sandbox.run("contact-update", ALEX, "--name", "Alex Rivera", "--confirm")
+    out, _, rc = _cu(sandbox, "--confirm")
     assert rc == 0
-    assert "(unchanged)" in out
+    assert "unchanged" in out
     assert "Nothing to change." in out
     assert "0 entries changed, 0 mentions changed, 1 unchanged, 0 skipped" in out
+    assert sandbox.activities.read_text() == activities_before
+    assert _ledger(sandbox) == ledger_before
+
+
+def test_contact_update_old_equals_new_is_a_no_op(sandbox):
+    _seed_alex(sandbox)
+    activities_before = sandbox.activities.read_text()
+    out, _, rc = _cu(sandbox, "--confirm", new=OLD)
+    assert rc == 0, out
+    assert "Nothing to change." in out
+    assert sandbox.activities.read_text() == activities_before
+
+
+def test_contact_update_rerun_is_a_no_op(sandbox):
+    """Running the same rename twice changes nothing the second time."""
+    _seed_alex(sandbox)
+    _, _, rc = _cu(sandbox, "--confirm")
+    assert rc == 0
+    after_first = sandbox.activities.read_text()
+    ledger_first = _ledger(sandbox)
+    out, _, rc = _cu(sandbox, "--confirm")
+    assert rc == 0, out
+    assert "Nothing to change." in out
+    assert "0 entries changed, 0 mentions changed, 3 unchanged, 0 skipped" in out
+    assert sandbox.activities.read_text() == after_first
+    assert _ledger(sandbox) == ledger_first
+
+
+@pytest.mark.parametrize(
+    "new", ["bell hooks", "Maria Elena de la Cruz", "Alex Rivera Jr.", "Alex Dean"]
+)
+def test_contact_update_refuses_a_name_the_rolodex_cannot_read_back(sandbox, new):
+    """Lowercase, five words, a trailing period, a role word: refused whole."""
+    _seed_alex(sandbox)
+    activities_before = sandbox.activities.read_text()
+    ledger_before = _ledger(sandbox)
+    out, _, rc = _cu(sandbox, "--confirm", new=new)
+    assert rc == 1, out
+    assert "cannot read" in out
     assert sandbox.activities.read_text() == activities_before
     assert _ledger(sandbox) == ledger_before
 
@@ -385,19 +462,23 @@ def test_contact_update_counts_multiple_mentions_in_one_entry(sandbox):
         ),
     )
     ledger_before = _ledger(sandbox)
-    out, _, rc = sandbox.run("contact-update", ALEX, "--name", "Alex Rivera", "--confirm")
+    out, _, rc = _cu(sandbox, "--confirm")
     assert rc == 0, out
     assert _desc(sandbox, "2026-02-twice").strip() == (
         "Alex Rivera (arivera@example.edu) opened; later Alex Rivera <arivera@example.edu> closed."
     )
     new_lines = _ledger(sandbox)[len(ledger_before) :]
     assert len(new_lines) == 1
-    assert f"email={ALEX} mentions=2" in new_lines[0]
+    assert f"email={ALEX},mentions=2" in new_lines[0]
+    out, _, rc = sandbox.run("changes", "--op", "contact-update")
+    assert f"email={ALEX},mentions=2" in out
 
 
 def test_contact_update_unknown_email_returns_1(sandbox):
     activities_before = sandbox.activities.read_text()
-    out, _, rc = sandbox.run("contact-update", "nobody@example.org", "--name", "No Body")
+    out, _, rc = sandbox.run(
+        "contact-update", "nobody@example.org", "--old-name", "Old Body", "--name", "No Body"
+    )
     assert rc == 1
     assert "no 'Name (nobody@example.org' mention" in out
     assert sandbox.activities.read_text() == activities_before
@@ -407,14 +488,14 @@ def test_contact_update_rejects_single_word_name(sandbox):
     """A one-word name would vanish from the rolodex, so it is refused."""
     _seed_alex(sandbox)
     activities_before = sandbox.activities.read_text()
-    out, _, rc = sandbox.run("contact-update", ALEX, "--name", "Alex", "--confirm")
+    out, _, rc = _cu(sandbox, "--confirm", new="Alex")
     assert rc == 1
     assert "two or more words" in out
     assert sandbox.activities.read_text() == activities_before
 
 
 def test_contact_update_handles_quoted_scalar_description(sandbox):
-    """A quoted-scalar description is read, rewritten as a literal block, and stays valid."""
+    """A quoted-scalar description is read and rewritten exactly, and stays valid."""
     _append(
         sandbox,
         """
@@ -426,14 +507,79 @@ def test_contact_update_handles_quoted_scalar_description(sandbox):
               - sample
         """,
     )
-    out, _, rc = sandbox.run("contact-update", ALEX, "--name", "Alex Rivera", "--confirm")
+    out, _, rc = _cu(sandbox, "--confirm")
     assert rc == 0, out
-    assert (
-        _desc(sandbox, "2026-02-quoted").strip()
-        == "Reviewed by Alex Rivera (arivera@example.edu): approved."
+    assert _desc(sandbox, "2026-02-quoted") == (
+        "Reviewed by Alex Rivera (arivera@example.edu): approved."
     )
     _, _, rc = sandbox.run("validate")
     assert rc == 0
+
+
+def test_contact_update_refuses_duplicate_target_id(sandbox):
+    """A changed entry whose id appears twice refuses the whole command."""
+    _seed_alex(sandbox)
+    _append(sandbox, _literal_entry("2026-02-alex-one", "Same id, no mention."))
+    activities_before = sandbox.activities.read_text()
+    ledger_before = _ledger(sandbox)
+    out, _, rc = _cu(sandbox, "--confirm")
+    assert rc == 1, out
+    assert "2026-02-alex-one" in out and "duplicate" in out
+    assert sandbox.activities.read_text() == activities_before
+    assert _ledger(sandbox) == ledger_before
+
+
+def test_contact_update_keeps_escaped_separator_and_whitespace(sandbox):
+    """An existing double-quoted description holding U+2028 and trailing
+    whitespace is rewritten so that only the name changes."""
+    _append_raw(
+        sandbox,
+        "\n  - id: 2026-02-escaped\n"
+        "    date: '2026-02-12'\n"
+        "    title: Escaped separator\n"
+        '    description: "Met Alexandra Rivera (arivera@example.edu) on site.\\u2028'
+        'Second clause.  \\n\\n"\n'
+        "    tags:\n"
+        "      - sample\n",
+    )
+    entry_before = sandbox.entry("2026-02-escaped")
+    assert "\u2028" in entry_before["description"]
+    others_before = _others(sandbox, "2026-02-escaped")
+    out, _, rc = _cu(sandbox, "--confirm")
+    assert rc == 0, out
+    _assert_only_description_changed(
+        sandbox,
+        "2026-02-escaped",
+        others_before,
+        entry_before,
+        entry_before["description"].replace(OLD, "Alex Rivera"),
+    )
+    _, _, rc = sandbox.run("validate")
+    assert rc == 0
+
+
+def test_contact_update_multiline_quoted_continuation_at_field_indent(sandbox):
+    _append_raw(
+        sandbox,
+        "\n  - id: 2026-02-quoted-ml\n"
+        "    date: '2026-02-13'\n"
+        "    title: Multi-line quoted\n"
+        '    description: "Reviewed by Alexandra Rivera (arivera@example.edu)\n'
+        '    and approved in May."\n'
+        "    tags:\n"
+        "      - sample\n",
+    )
+    entry_before = sandbox.entry("2026-02-quoted-ml")
+    others_before = _others(sandbox, "2026-02-quoted-ml")
+    out, _, rc = _cu(sandbox, "--confirm")
+    assert rc == 0, out
+    _assert_only_description_changed(
+        sandbox,
+        "2026-02-quoted-ml",
+        others_before,
+        entry_before,
+        "Reviewed by Alex Rivera (arivera@example.edu) and approved in May.",
+    )
 
 
 # ---------------------------------------------------------------------------
