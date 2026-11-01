@@ -138,9 +138,9 @@ REF`).
 - **Read:** `search`, `get`, `filter`, `list`, `stats`, `rollup`, `tags`,
   `tag-audit`, `validate`, `export`, `project`, `similar`, `contact`, `changes`,
   `schema`
-- **Write:** `create`, `update-field`, `update-description`, `update-notes`,
-  `update-nested-field`, `add-tags`, `remove-tags`, `add-docs`, `remove-docs`,
-  `delete`, `rename-id`
+- **Write:** `create`, `update-field`, `update-description`, `edit-description`,
+  `update-notes`, `update-nested-field`, `add-tags`, `remove-tags`, `add-docs`,
+  `remove-docs`, `delete`, `rename-id`, `contact-update`
 - **File inventory:** `file-add`, `file-list`, `file-get`, `file-move`,
   `file-update`, `file-rehash`, `file-search`
 

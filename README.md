@@ -122,7 +122,7 @@ by a **pluggable schema** you choose. It ships as:
   source descriptions so the caller can fold the prose in by hand via
   `update-description`.
 - **Cross-process write lock** — every writer (`create`, `delete`, `update-*`,
-  `set-block`, `add-tags`, `remove-tags`, `add-docs`, `remove-docs`,
+  `edit-description`, `contact-update`, `set-block`, `add-tags`, `remove-tags`, `add-docs`, `remove-docs`,
   `rename-id`, `merge`, file-inventory writes) takes an exclusive advisory
   lock around its full read-plan-write transaction, so two concurrent
   librarian processes serialize cleanly instead of last-writer-wins.
@@ -290,6 +290,58 @@ institution (the flag is name-suggestive of the domain case but matches
 anywhere in the email — `--institution garcia` would also hit local-parts
 like `garcia@anywhere.com`).
 
+### Fixing a contact
+
+The rolodex is derived, so a name is fixed in the descriptions that carry it.
+`contact-update` does that across the whole corpus in one step:
+
+```bash
+librarian contact-update mgarcia@example.edu --name "Dr. Maria Garcia-Lopez"
+#   2024-grant-application: Dr. Maria Garcia -> Dr. Maria Garcia-Lopez
+#   2025-conference-poster: Dr. Maria Garcia -> Dr. Maria Garcia-Lopez
+#
+# 2 entries changed, 2 mentions changed, 0 unchanged, 0 skipped
+#
+# Dry run: pass --confirm to actually write.
+
+librarian contact-update mgarcia@example.edu --name "Dr. Maria Garcia-Lopez" \
+  --confirm --label cli:fix-contact
+```
+
+- It is a dry run until you pass `--confirm` (`--dry-run` wins over
+  `--confirm`). A label is required only with `--confirm`.
+- Only the name text the rolodex derives, directly before the `(` or `<`, is
+  replaced. That derived name includes a title such as `Dr.`, so put the title
+  in `--name` to keep it. Bylines, citations, and prose mentions without the
+  email are never touched.
+- A mention whose name cannot be located safely (for example, the email has no
+  two-word name before it) is listed under "Skipped" and left as it is.
+- `--name` needs two or more words, because the rolodex skips shorter names
+  and the contact would disappear from `contact`.
+- Each changed entry gets one ledger line (`contact-update`, with the email
+  and mention count). The email is matched case-insensitively. An email with
+  no mentions anywhere exits 1.
+- Changed descriptions are rewritten as literal blocks, the same way
+  `update-description` writes them.
+
+For any other one-line fix, `edit-description` replaces a single passage
+without resending the whole description:
+
+```bash
+librarian edit-description 2025-conference-talk \
+  --old "coordinated the" --new "organized the" --dry-run
+librarian edit-description 2025-conference-talk \
+  --old "coordinated the" --new "organized the" --label cli:fix-typo
+```
+
+`--old` must occur exactly once in the description; otherwise the command
+reports how many times it occurs and writes nothing. `--dry-run` shows the
+passage with about 60 characters of context either side and needs no label.
+The ledger line records `old_chars`, `new_chars` and the final length. Both
+commands are also MCP tools (`librarian_contact_update`,
+`librarian_edit_description`); `librarian_contact_update` takes `confirm`
+and is a dry run without it.
+
 ## The MCP server
 
 `librarian` ships an [MCP](https://modelcontextprotocol.io) server so an AI
@@ -397,9 +449,9 @@ default.
 `tag-audit`, `validate`, `export`, `project`, `similar`, `contact`, `changes`,
 `schema`, `env`
 
-**Write:** `create`, `update-field`, `update-description`, `update-notes`,
-`update-nested-field`, `set-block`, `add-tags`, `remove-tags`, `add-docs`,
-`remove-docs`, `delete`, `rename-id`, `merge`
+**Write:** `create`, `update-field`, `update-description`, `edit-description`,
+`update-notes`, `update-nested-field`, `set-block`, `add-tags`, `remove-tags`,
+`add-docs`, `remove-docs`, `delete`, `rename-id`, `merge`, `contact-update`
 
 **File inventory:** `file-add`, `file-list`, `file-get`, `file-move`,
 `file-update`, `file-rehash`, `file-search`
