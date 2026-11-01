@@ -9,6 +9,7 @@ keeps :mod:`librarian.cli` focused on argument parsing and I/O.
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
 
 import yaml
 
@@ -765,6 +766,112 @@ def extract_contacts(activities: list[dict]) -> dict[str, dict]:
             if eid not in record["sources"]:
                 record["sources"].append(eid)
     return contacts
+
+
+class NameMention(NamedTuple):
+    """One ``Name (email`` mention of an email, classified for a rename.
+
+    ``status`` is ``"change"`` when the text before the bracket ends with the
+    old name, ``"unchanged"`` when it already ends with the new name, and
+    ``"skip"`` otherwise. ``start`` / ``end`` delimit the matched name (both
+    ``None`` for a skip); ``bracket`` is the index of the ``(`` or ``<``.
+    """
+
+    status: str
+    start: int | None
+    end: int | None
+    bracket: int
+
+
+def _name_tail_span(description: str, bracket: int, name: str) -> tuple[int, int] | None:
+    """Span of ``name`` if the text before ``bracket`` ends with it.
+
+    Whitespace between the name and the bracket is allowed. The name must
+    start the text or follow a whitespace character, so ``XAlex Rivera``
+    does not end with ``Alex Rivera``.
+    """
+    end = len(description[:bracket].rstrip())
+    start = end - len(name)
+    if start < 0 or description[start:end] != name:
+        return None
+    if start > 0 and not description[start - 1].isspace():
+        return None
+    return start, end
+
+
+def find_name_mentions(
+    description: str, email: str, old_name: str, new_name: str
+) -> list[NameMention]:
+    """Classify every ``Name (email`` mention of ``email`` for a rename.
+
+    Pure and I/O-free. The email match is case-insensitive and uses the same
+    wrapped-email pattern as :func:`extract_contacts`. Only the exact old or
+    new name directly before the bracket is ever matched, so words before it
+    (a verb, a role, a title, the end of the previous sentence) are never
+    part of a span. When one name ends with the other, the longer is tried
+    first: renaming ``Alex Rivera`` to ``Dr. Alex Rivera`` leaves an
+    already-renamed mention unchanged instead of adding a second title.
+    """
+    wanted = email.strip().lower()
+    order = sorted([("unchanged", new_name), ("change", old_name)], key=lambda pair: -len(pair[1]))
+    mentions: list[NameMention] = []
+    for match in _WRAPPED_EMAIL_RE.finditer(description):
+        if match.group(1).strip().rstrip(".,;:").lower() != wanted:
+            continue
+        bracket = match.start()
+        for status, name in order:
+            span = _name_tail_span(description, bracket, name)
+            if span is not None:
+                mentions.append(NameMention(status, span[0], span[1], bracket))
+                break
+        else:
+            mentions.append(NameMention("skip", None, None, bracket))
+    return mentions
+
+
+class ContactRename(NamedTuple):
+    """The planned result of renaming one contact in one description.
+
+    ``text`` is the rewritten description and ``mentions`` the classified
+    mentions (offsets refer to the original description). ``unreadable``
+    lists each changed mention whose name the rolodex would not read back
+    as the new name, with the name it derives instead.
+    """
+
+    text: str
+    mentions: list[NameMention]
+    unreadable: list[tuple[NameMention, str]]
+
+
+def rename_contact(description: str, email: str, old_name: str, new_name: str) -> ContactRename:
+    """Replace ``old_name`` with ``new_name`` in each ``Name (email`` mention.
+
+    Pure and I/O-free. After the rewrite, the rolodex name walk-back is run
+    at each changed mention; the derived name must end with ``new_name`` at a
+    word boundary, or the mention is reported in ``unreadable`` (a lowercase
+    name, more than four words, a role word or a trailing period would make
+    the contact vanish or change on the next read).
+    """
+    mentions = find_name_mentions(description, email, old_name, new_name)
+    pieces: list[str] = []
+    prev = 0
+    shift = 0
+    moved: list[tuple[NameMention, int]] = []
+    for mention in mentions:
+        if mention.status != "change":
+            continue
+        pieces += [description[prev : mention.start], new_name]
+        prev = mention.end
+        shift += len(new_name) - (mention.end - mention.start)
+        moved.append((mention, mention.bracket + shift))
+    text = "".join(pieces) + description[prev:]
+
+    unreadable = []
+    for mention, bracket in moved:
+        derived = _walk_back_for_name(text, bracket)
+        if _name_tail_span(derived, len(derived), new_name) is None:
+            unreadable.append((mention, derived))
+    return ContactRename(text, mentions, unreadable)
 
 
 def canonical_name(names: set[str]) -> str:

@@ -577,6 +577,53 @@ def librarian_update_description(entry_id: str, new_description: str, session_la
 
 
 @mcp.tool()
+def librarian_edit_description(
+    entry_id: str, old: str, new: str, session_label: str, dry_run: bool = False
+) -> str:
+    """Replace one exact passage in an entry's description.
+
+    Refuses unless `old` occurs exactly once (the error reports the count);
+    the rest of the description is untouched. `dry_run=True` previews the
+    passage with context and writes nothing.
+    """
+    label = _validate_label(session_label)
+    # The "--flag=value" form keeps a value that starts with "-" from being
+    # read as another option.
+    args = ["edit-description", entry_id, f"--old={old}", f"--new={new}"]
+    if dry_run:
+        args.append("--dry-run")
+    return _out(_run_cli(args, extra_env={"LIBRARIAN_SESSION_LABEL": label}))
+
+
+@mcp.tool()
+def librarian_contact_update(
+    email: str, old_name: str, name: str, session_label: str, confirm: bool = False
+) -> str:
+    """Rename a contact in every `Name (email)` mention of one email address.
+
+    `old_name` is the current name text; a mention is rewritten only when
+    the text directly before its bracket ends with it, and only that text
+    changes, so a title or verb before it ("Dr.", "Met") stays. Names from
+    `librarian_contact` are derived and can begin with a title, verb, role
+    or the end of the previous sentence ("Met Alex Rivera", "Denver. Alex
+    Rivera"): pass only the name itself ("Alex Rivera"), never those
+    leading words, or they are replaced too. Other mentions are listed as
+    skipped. Requires
+    confirm=True to write; otherwise returns a dry-run preview. The whole
+    call is refused, writing nothing, if the rolodex could not read `name`
+    back (lowercase, more than four words, a role word, a trailing period)
+    or a changed entry's id is duplicated.
+    """
+    label = _validate_label(session_label)
+    # The "--flag=value" form keeps a value that starts with "-" from being
+    # read as another option.
+    args = ["contact-update", email, f"--old-name={old_name}", f"--name={name}"]
+    if confirm:
+        args.append("--confirm")
+    return _out(_run_cli(args, extra_env={"LIBRARIAN_SESSION_LABEL": label}))
+
+
+@mcp.tool()
 def librarian_update_notes(
     entry_id: str, new_notes: str, session_label: str, block: str = "", field: str = "notes"
 ) -> str:
