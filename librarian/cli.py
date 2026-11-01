@@ -2338,6 +2338,11 @@ def cmd_contact_update(ctx: Context, args: list[str]) -> int:
             print(f"       before the email. Names the rolodex derives for {email}:")
             for name in variants:
                 print(f"         '{name}'")
+            # A derived name can sweep in the words before it, and passing
+            # one of those as --old-name would replace them too.
+            print("       A derived name can begin with a title, a verb, a role or the end")
+            print("       of the previous sentence ('Met Alex Rivera', 'Denver. Alex Rivera').")
+            print("       Pass only the name itself; any text left out of --old-name stays.")
         else:
             print(f"       before the email. The rolodex derives no name for {email}.")
         return 1

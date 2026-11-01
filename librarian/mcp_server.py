@@ -601,10 +601,14 @@ def librarian_contact_update(
 ) -> str:
     """Rename a contact in every `Name (email)` mention of one email address.
 
-    `old_name` is the current name text (see `librarian_contact`); a mention
-    is rewritten only when the text directly before its bracket ends with
-    it, and only that text changes, so a title or verb before it ("Dr.",
-    "Met") stays. Other mentions are listed as skipped. Requires
+    `old_name` is the current name text; a mention is rewritten only when
+    the text directly before its bracket ends with it, and only that text
+    changes, so a title or verb before it ("Dr.", "Met") stays. Names from
+    `librarian_contact` are derived and can begin with a title, verb, role
+    or the end of the previous sentence ("Met Alex Rivera", "Denver. Alex
+    Rivera"): pass only the name itself ("Alex Rivera"), never those
+    leading words, or they are replaced too. Other mentions are listed as
+    skipped. Requires
     confirm=True to write; otherwise returns a dry-run preview. The whole
     call is refused, writing nothing, if the rolodex could not read `name`
     back (lowercase, more than four words, a role word, a trailing period)

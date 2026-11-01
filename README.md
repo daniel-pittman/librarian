@@ -295,7 +295,10 @@ like `garcia@anywhere.com`).
 The rolodex is derived, so a name is fixed in the descriptions that carry it.
 `contact-update` does that across the whole corpus in one step. Name the text
 to replace with `--old-name` (run it without `--old-name` to list the names the
-rolodex derives for the email):
+rolodex derives for the email). A derived name can begin with a title, a verb,
+a role or the end of the previous sentence ("Met Maria Garcia", "Denver. Maria
+Garcia"), so pass only the name itself: any text left out of `--old-name`
+stays where it is, and any text included is replaced.
 
 ```bash
 librarian contact-update mgarcia@example.edu \

@@ -300,6 +300,8 @@ def test_contact_update_requires_old_name_and_lists_variants(sandbox):
     assert "--old-name" in out
     assert "'Dr. Alexandra Rivera'" in out
     assert "'Alexandra Rivera'" in out
+    # Derived names can include lead-in words; the hint must say to leave them out.
+    assert "Pass only the name itself" in out
     assert sandbox.activities.read_text() == activities_before
 
 
