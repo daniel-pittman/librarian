@@ -455,3 +455,102 @@ def test_librarian_project_defaults_to_brief(monkeypatch):
     monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
     mcp_server.librarian_project("some-project")
     assert "--brief" in captured["args"]
+
+
+def test_edit_description_tool_translates_to_cli(monkeypatch):
+    """librarian_edit_description forwards id, --old/--new (equals form) and --dry-run."""
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        captured["env"] = kw.get("extra_env")
+        return {"ok": True, "stdout": "edited\n", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    out = mcp_server.librarian_edit_description(
+        entry_id="2026-09-x", old="-old text", new="new text", session_label="mcp:test"
+    )
+    assert out == "edited\n"
+    # The equals form lets a value that starts with "-" through argparse.
+    assert captured["args"] == [
+        "edit-description",
+        "2026-09-x",
+        "--old=-old text",
+        "--new=new text",
+    ]
+    assert captured["env"] == {"LIBRARIAN_SESSION_LABEL": "mcp:test"}
+
+    mcp_server.librarian_edit_description(
+        entry_id="2026-09-x", old="a", new="b", session_label="mcp:test", dry_run=True
+    )
+    assert captured["args"] == ["edit-description", "2026-09-x", "--old=a", "--new=b", "--dry-run"]
+
+
+def test_contact_update_tool_is_dry_run_by_default(monkeypatch):
+    """librarian_contact_update only adds --confirm when asked."""
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        captured["env"] = kw.get("extra_env")
+        return {"ok": True, "stdout": "", "stderr": "", "exit_code": 0}
+
+    monkeypatch.setattr(mcp_server, "_run_cli", fake_run)
+    mcp_server.librarian_contact_update(
+        email="a@example.edu",
+        old_name="-Alexandra Rivera",
+        name="Alex Rivera",
+        session_label="mcp:test",
+    )
+    # The equals form lets a value that starts with "-" through argparse.
+    assert captured["args"] == [
+        "contact-update",
+        "a@example.edu",
+        "--old-name=-Alexandra Rivera",
+        "--name=Alex Rivera",
+    ]
+    assert captured["env"] == {"LIBRARIAN_SESSION_LABEL": "mcp:test"}
+
+    mcp_server.librarian_contact_update(
+        email="a@example.edu",
+        old_name="Alexandra Rivera",
+        name="Alex Rivera",
+        session_label="mcp:test",
+        confirm=True,
+    )
+    assert captured["args"] == [
+        "contact-update",
+        "a@example.edu",
+        "--old-name=Alexandra Rivera",
+        "--name=Alex Rivera",
+        "--confirm",
+    ]
+
+
+def test_new_write_tools_require_a_session_label():
+    """Both tools reject a blank label before reaching the CLI."""
+    with pytest.raises(ValueError):
+        mcp_server.librarian_edit_description(entry_id="x", old="a", new="b", session_label=" ")
+    with pytest.raises(ValueError):
+        mcp_server.librarian_contact_update(
+            email="a@b.edu", old_name="C D", name="A B", session_label=""
+        )
+
+
+def test_new_write_tools_surface_cli_errors(monkeypatch):
+    """A failing CLI call comes back as an ERROR string, not an empty success."""
+    monkeypatch.setattr(
+        mcp_server,
+        "_run_cli",
+        lambda args, **kw: {
+            "ok": False,
+            "stdout": "ERROR: --old must occur exactly once in 'x' (found 0)\n",
+            "stderr": "",
+            "exit_code": 1,
+        },
+    )
+    out = mcp_server.librarian_edit_description(
+        entry_id="x", old="a", new="b", session_label="mcp:test"
+    )
+    assert out.startswith("ERROR:")
+    assert "found 0" in out

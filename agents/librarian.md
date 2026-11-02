@@ -122,6 +122,21 @@ id-character lookarounds, so a rename of `ongoing-coi` will not touch
 `ongoing-coi-training`. Do NOT delete+recreate to fix an id; that loses the
 cross-reference repointing.
 
+### 8. Fixing a contact name or one passage
+
+To rename a contact everywhere, run `contact-update <email> --old-name "OLD"
+--name "NEW"`. Run it first without `--old-name` to see the names the rolodex
+derives for that email, then pass the name text itself (not a title or verb
+before it) as `--old-name`. Only that text changes, so "Met" or "Dr." before
+it stays. It is a dry run until `--confirm` (MCP: `confirm=True`); read the
+preview before confirming. It refuses the whole rename, writing nothing, when
+the new name could not be read back by the rolodex (lowercase, more than four
+words, a role word, a trailing period) or a changed entry's id is duplicated;
+report that to the user rather than working around it. To fix one passage,
+use `edit-description <id> --old TEXT --new TEXT`, which refuses unless the
+passage occurs exactly once. Every description write is parse-checked first
+and refused if the file would not read back as intended.
+
 ## The file inventory
 
 Supporting artifact files (PDFs, posters, decks, certificates) are tracked in a
@@ -138,9 +153,9 @@ REF`).
 - **Read:** `search`, `get`, `filter`, `list`, `stats`, `rollup`, `tags`,
   `tag-audit`, `validate`, `export`, `project`, `similar`, `contact`, `changes`,
   `schema`
-- **Write:** `create`, `update-field`, `update-description`, `update-notes`,
-  `update-nested-field`, `add-tags`, `remove-tags`, `add-docs`, `remove-docs`,
-  `delete`, `rename-id`
+- **Write:** `create`, `update-field`, `update-description`, `edit-description`,
+  `update-notes`, `update-nested-field`, `add-tags`, `remove-tags`, `add-docs`,
+  `remove-docs`, `delete`, `rename-id`, `contact-update`
 - **File inventory:** `file-add`, `file-list`, `file-get`, `file-move`,
   `file-update`, `file-rehash`, `file-search`
 

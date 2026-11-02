@@ -120,7 +120,13 @@ jobs:
   # actions, so it stays compatible with the "pin actions to a full-length SHA"
   # repository setting (there is nothing to pin).
   await-tests:
-    if: ${{ github.actor != 'dependabot[bot]' }}
+    # Gate on who AUTHORED the pull request, not github.actor, which is whoever
+    # triggered THIS run. The two diverge the moment anyone re-runs a dependabot
+    # PR's checks or updates its branch, and branch protection makes updating
+    # mandatory before merge. Keying on the actor flipped these jobs from skipped
+    # to running against a PR the review never comments on, so verdict-extract
+    # found nothing and a required check failed, leaving dependabot PRs unmergeable.
+    if: ${{ github.event.pull_request.user.login != 'dependabot[bot]' }}
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -182,7 +188,7 @@ jobs:
           gh pr comment "$PR" --repo "$REPO" --body-file ci-tests-comment.md
 
   claude-review:
-    if: ${{ github.actor != 'dependabot[bot]' }}
+    if: ${{ github.event.pull_request.user.login != 'dependabot[bot]' }}
     # Both gates post their sticky comments before the review runs:
     #   semgrep -> "Semgrep (OSS)"; await-tests -> "CI Tests".
     needs: [semgrep, await-tests]
@@ -258,7 +264,7 @@ jobs:
   verdict-extract:
     needs: [claude-review]
     # Only run when the review actually produced something to extract from.
-    if: ${{ needs.claude-review.result == 'success' && github.actor != 'dependabot[bot]' }}
+    if: ${{ needs.claude-review.result == 'success' && github.event.pull_request.user.login != 'dependabot[bot]' }}
     runs-on: ubuntu-latest
     # The verdict travels to the gate as a JOB OUTPUT built from the action's
     # STRUCTURED OUTPUT (claude-code-action's `--json-schema` feature, v1.0.152+):
@@ -299,6 +305,38 @@ jobs:
             echo "No review comment by $REVIEW_BOT found; extractor cannot run." >&2
             exit 1
           fi
+
+          # THE REVIEW JOB CAN REPORT SUCCESS HAVING POSTED ONLY A PROGRESS
+          # PLACEHOLDER. When the review agent cannot run — an API rate limit is
+          # the usual cause, and the lab's repos share one account so concurrent
+          # CI across repos trips it — the action still writes "I'll analyze this
+          # and get back to you" and exits 0. The gate's REVIEW_RESULT check
+          # (which treats a non-success review as a transient throttle) never
+          # fires, the extractor finds no HIGH/CRITICAL in a comment that
+          # contains nothing, and the gate reports PASS on a pull request nobody
+          # reviewed. A gate that cannot tell "reviewed and clean" from "never
+          # reviewed" is worse than a red one, because it looks like evidence.
+          #
+          # The REMEDY DIFFERS from every other failure here, which is why it is
+          # named rather than left to the generic message: `gh run rerun --failed`
+          # re-runs only the extractor, which re-reads the same placeholder and
+          # fails identically. The whole workflow has to run again so the REVIEW
+          # job runs again.
+          #
+          # Detected by size, NOT by matching the placeholder text. Matching the
+          # text rejects any real review that quotes it — which is exactly what
+          # happened to the review of the PR that introduced this guard. The
+          # review writes its own heading so there is no fixed marker to require;
+          # what placeholders have in common is carrying no findings at all.
+          # Measured corpus: shortest real review 836 bytes, placeholders 190 and
+          # under.
+          bytes=$(wc -c < REVIEW.md | tr -d ' ')
+          if [ "$bytes" -lt 400 ]; then
+            echo "::error::The review bot's latest comment is ${bytes} bytes, which is a progress placeholder rather than a review. RE-RUN THE WHOLE WORKFLOW (gh run rerun <id>), not just the failed jobs: --failed re-runs this extractor against the same placeholder and fails again. Comment follows:" >&2
+            cat REVIEW.md >&2
+            exit 1
+          fi
+
 
       # SHA-pinned anthropics/claude-code-action v1.0.152. Cheap model (Haiku) —
       # this is a one-shot classification, not a review. The verdict comes back as
@@ -373,7 +411,7 @@ jobs:
     # always(): the gate must still run (and report INCONCLUSIVE) when the review
     # or extractor errored — `needs` would otherwise SKIP it, and a skipped
     # required check could be misread as non-blocking. Skip only for dependabot.
-    if: ${{ always() && github.actor != 'dependabot[bot]' }}
+    if: ${{ always() && github.event.pull_request.user.login != 'dependabot[bot]' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
