@@ -61,3 +61,5 @@ open a public issue — follow `SECURITY.md` instead.
 - `develop` — integration branch for upcoming work.
 
 Open pull requests against `develop` unless a maintainer directs otherwise.
+
+<!-- workflow probe: this PR is closed without merging -->
