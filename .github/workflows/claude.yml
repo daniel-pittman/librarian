@@ -22,7 +22,8 @@
 #
 # Permissions: `contents: read` because the bot does not push branches (it
 # replies with fix links a maintainer clicks), `pull-requests: write` and
-# `issues: write` to post its replies, `actions: read` to read CI results.
+# `issues: write` to post its replies, `actions: read` to read CI results. The
+# App token is narrowed the same way through `additional_permissions` below.
 #
 # The CLAUDE_CODE_OAUTH_TOKEN repository secret must be provisioned by a
 # maintainer (see SECURITY.md).
@@ -91,6 +92,35 @@ jobs:
               exit 1 ;;
           esac
 
+      # The action puts the thread's comments, reviews and review comments into
+      # the agent's prompt, and the trust rule above covers only the commenter
+      # and the thread author. include_comments_by_actor (below) keeps every
+      # other author out, so it needs the logins of this thread's trusted
+      # authors, judged by the same author_association rule as the gate.
+      # `github-actions` (the workflows' own sticky comments) is added by
+      # name: the action filters on GraphQL logins, where bots have no [bot]
+      # suffix. The bot's own earlier replies (GraphQL login `claude`) are left
+      # out on purpose: an unrelated user account also has the login `claude`.
+      - name: List this thread's trusted authors
+        id: trusted
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          n=$(jq -r '.issue.number // .pull_request.number' "$GITHUB_EVENT_PATH")
+          trusted='.[] | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") | .user.login'
+          {
+            gh api "repos/$REPO/issues/$n/comments" --paginate --jq "$trusted"
+            if jq -e '.pull_request or .issue.pull_request' "$GITHUB_EVENT_PATH" >/dev/null; then
+              gh api "repos/$REPO/pulls/$n/reviews" --paginate --jq "$trusted"
+              gh api "repos/$REPO/pulls/$n/comments" --paginate --jq "$trusted"
+            fi
+            echo github-actions
+          } | sort -u > "$RUNNER_TEMP/trusted-authors.txt"
+          echo "actors=$(paste -sd, "$RUNNER_TEMP/trusted-authors.txt")" >> "$GITHUB_OUTPUT"
+
       # SHA-pinned actions/checkout v4.2.2
       - name: Check out the repository
         if: steps.guard.outputs.skip == 'false'
@@ -121,8 +151,16 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           include_fix_links: true
           track_progress: true
+          include_comments_by_actor: ${{ steps.trusted.outputs.actors }}
+          # The action asks for an App token with contents, pull_requests and
+          # issues all `write` unless these lines override a key; the token's
+          # reach is the agent's real ceiling, so contents drops to read (the
+          # bot does not push). Keys use the API's spelling, `pull_requests`
+          # with an underscore: a hyphenated key is a different, unknown key
+          # and leaves the default in place.
           additional_permissions: |
             actions: read
+            contents: read
           claude_args: >-
             --allowedTools "Read,Grep,Glob"
             --disallowedTools "Bash,Edit,MultiEdit,Write,NotebookEdit,WebFetch,WebSearch,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Read(./.git/**),Read(//proc/**)"

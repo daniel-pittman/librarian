@@ -105,7 +105,7 @@ jobs:
             } > semgrep-comment.md
           fi
           # Sticky: delete any prior Semgrep comment so the thread keeps one.
-          gh api "repos/$REPO/issues/$PR/comments" \
+          gh api "repos/$REPO/issues/$PR/comments" --paginate \
             --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" \
           | while read -r id; do
               gh api -X DELETE "repos/$REPO/issues/comments/$id" || true
@@ -179,7 +179,7 @@ jobs:
             printf '\n_Posted before the Claude review so the test outcome is folded into the review._\n'
           } > ci-tests-comment.md
           # Sticky: replace any prior CI Tests comment so the thread keeps one.
-          gh api "repos/$REPO/issues/$PR/comments" \
+          gh api "repos/$REPO/issues/$PR/comments" --paginate \
             --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" \
           | while read -r id; do
               gh api -X DELETE "repos/$REPO/issues/comments/$id" || true
@@ -207,6 +207,39 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      # The code-review plugin is installed from a one-entry local marketplace
+      # that names a fixed commit of anthropics/claude-plugins-official. The
+      # upstream marketplace in anthropics/claude-code tracks that repository's
+      # `main`, so the review's prompt and its tool grants would otherwise
+      # change with no commit here. The action accepts a marketplace as a git
+      # URL ending in .git (no ref) or a local path, hence the local file. To
+      # bump: take the latest commit touching plugins/code-review,
+      #   gh api 'repos/anthropics/claude-plugins-official/commits?path=plugins/code-review&per_page=1' --jq '.[0].sha'
+      # and read the command file's allowed-tools at that commit against the
+      # deny list below.
+      - name: Pin the code-review plugin
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/pinned-plugins/.claude-plugin"
+          mkdir -p "$dir"
+          cat > "$dir/marketplace.json" <<'EOF'
+          {
+            "name": "pinned-plugins",
+            "owner": { "name": "pinned-plugins" },
+            "plugins": [
+              {
+                "name": "code-review",
+                "source": {
+                  "source": "git-subdir",
+                  "url": "https://github.com/anthropics/claude-plugins-official.git",
+                  "path": "plugins/code-review",
+                  "sha": "9780cf407f5593727b668bae95a0c4ae2e0de1ae"
+                }
+              }
+            ]
+          }
+          EOF
 
       # SHA-pinned anthropics/claude-code-action v1.0.152. Bump by re-resolving
       # the v1 tag's target commit:
@@ -245,11 +278,17 @@ jobs:
         uses: anthropics/claude-code-action@51705da45eecce209d4700538bf8377d5b5fc695 # v1.0.152
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
+          plugin_marketplaces: ${{ runner.temp }}/pinned-plugins
+          plugins: 'code-review@pinned-plugins'
           include_fix_links: true
           track_progress: true
           allowed_bots: 'claude[bot]'
+          # The action asks for an App token with contents, pull_requests and
+          # issues all `write` unless a key is overridden here; the review
+          # posts comments but never pushes, so contents drops to read. Keys
+          # use the API's spelling (`pull_requests`, underscore).
+          additional_permissions: |
+            contents: read
           claude_args: >-
             --model opus
             --permission-mode default
@@ -335,8 +374,10 @@ jobs:
           # The latest comment authored by the review bot is the review. Pass it to
           # the extractor as a file (not inline in the prompt) to avoid prompt
           # injection from the review/PR text.
-          gh api "repos/$REPO/issues/$PR/comments" --paginate \
-            --jq "map(select(.user.login==\"$REVIEW_BOT\")) | last | .body // \"\"" > REVIEW.md
+          # --slurp joins the pages first: a --jq filter runs once per page, so
+          # `last` there would emit one comment per page on a long thread.
+          gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp \
+            | jq -r --arg bot "$REVIEW_BOT" 'add | map(select(.user.login == $bot)) | last | .body // ""' > REVIEW.md
           if [ ! -s REVIEW.md ]; then
             echo "No review comment by $REVIEW_BOT found; extractor cannot run." >&2
             exit 1
@@ -392,6 +433,13 @@ jobs:
           # track_progress off: this is a data task, not a PR conversation; we read
           # the result from structured_output, not a comment.
           track_progress: false
+          # The extractor writes nothing to GitHub, so every key of the App
+          # token it is given drops to read (`pull_requests` with an underscore,
+          # the API's spelling; a hyphenated key would leave the write default).
+          additional_permissions: |
+            contents: read
+            pull_requests: read
+            issues: read
           claude_args: |
             --model haiku
             --allowedTools "Read(./REVIEW.md)"
@@ -537,8 +585,9 @@ jobs:
           #    was created (see the header for why the run, not the commit).
           override="no"; ack_actor=""
           if gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null | grep -qx "$ACK_LABEL"; then
-            ev=$(gh api "repos/$REPO/issues/$PR/events" --paginate \
-              --jq "map(select(.event==\"labeled\" and .label.name==\"$ACK_LABEL\")) | last" 2>/dev/null || echo '{}')
+            # --slurp joins the pages first (see the REVIEW.md fetch above).
+            ev=$(gh api "repos/$REPO/issues/$PR/events" --paginate --slurp 2>/dev/null \
+              | jq -c --arg l "$ACK_LABEL" 'add | map(select(.event == "labeled" and .label.name == $l)) | last // {}' 2>/dev/null || echo '{}')
             ack_actor=$(printf '%s' "$ev" | jq -r '.actor.login // ""' 2>/dev/null || echo "")
             applied_at=$(printf '%s' "$ev" | jq -r '.created_at // ""' 2>/dev/null || echo "")
             run_at=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq '.created_at // ""' 2>/dev/null || echo "")
@@ -584,7 +633,7 @@ jobs:
             # GitHub's checks UI already marks required checks; the verdict lines
             # above tell the reader what to do regardless of enforcement.
           } > gate-comment.md
-          gh api "repos/$REPO/issues/$PR/comments" \
+          gh api "repos/$REPO/issues/$PR/comments" --paginate \
             --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" 2>/dev/null \
           | while read -r id; do gh api -X DELETE "repos/$REPO/issues/comments/$id" >/dev/null 2>&1 || true; done
           gh pr comment "$PR" --repo "$REPO" --body-file gate-comment.md || true
