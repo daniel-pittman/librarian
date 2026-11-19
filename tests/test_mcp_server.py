@@ -1,7 +1,7 @@
 """Tests for the MCP server launch path.
 
 These do NOT spin up a full MCP session; they exercise the script-mode entry
-point and verify it does not crash before the FastMCP runtime is ready to
+point and verify it does not crash before the MCP runtime is ready to
 accept stdin. The case that motivates this file is the relative-import pitfall:
 a user who launches the server with ``python path/to/mcp_server.py`` (because
 the file is right there) instead of ``python -m librarian.mcp_server`` must
@@ -10,10 +10,12 @@ not see an ``ImportError`` before the handshake can run.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -73,6 +75,88 @@ def test_mcp_server_runs_as_script_file(tmp_path):
         f"stdout={proc.stdout.decode(errors='replace')!r}\n"
         f"stderr={proc.stderr.decode(errors='replace')!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool surface — every decorated tool must register on the installed mcp major
+# ---------------------------------------------------------------------------
+
+
+def _decorated_tool_names() -> set[str]:
+    """Names of the functions decorated with ``@mcp.tool()`` in the source.
+
+    Read from the file rather than hardcoded, so adding a tool does not
+    require touching this test, while a decorator that silently fails to
+    register on some mcp version still shows up as a missing name.
+    """
+    source = _SERVER_SCRIPT.read_text(encoding="utf-8").splitlines()
+    names = set()
+    for i, line in enumerate(source):
+        if line.strip() == "@mcp.tool()":
+            nxt = source[i + 1].strip()
+            assert nxt.startswith("def "), f"unexpected line after @mcp.tool(): {nxt!r}"
+            names.add(nxt[len("def ") :].split("(", 1)[0])
+    return names
+
+
+def test_every_decorated_tool_is_registered():
+    """The server object lists exactly the tools the source decorates, and
+    carries the workflow instructions clients are shown at initialize."""
+    listed = {tool.name for tool in asyncio.run(mcp_server.mcp.list_tools())}
+    expected = _decorated_tool_names()
+    assert expected, "found no @mcp.tool() functions; the source scan is broken"
+    assert listed == expected
+    assert mcp_server.mcp.instructions == mcp_server.INSTRUCTIONS
+
+
+def test_server_lists_tools_over_stdio(tmp_path):
+    """A real stdio session through the script entry point: initialize, send
+    ``notifications/initialized``, then ``tools/list``. Raw JSON-RPC keeps the
+    test independent of the client API, which differs between mcp majors.
+
+    stdin stays open until each reply is read, as a real client's does: mcp
+    2.x stops at stdin EOF without answering requests still in flight, so
+    writing every message and closing at once loses the ``tools/list`` reply.
+    """
+    env = {**os.environ, "LIBRARIAN_HOME": str(tmp_path), "LIBRARIAN_MEMORY_DIR": ""}
+    proc = subprocess.Popen(
+        [sys.executable, str(_SERVER_SCRIPT)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    # readline() has no timeout; killing the server closes stdout, so a hung
+    # server fails the test instead of hanging the suite.
+    watchdog = threading.Timer(30, proc.kill)
+    watchdog.start()
+
+    def send(message: dict) -> None:
+        proc.stdin.write((json.dumps(message) + "\n").encode())
+        proc.stdin.flush()
+
+    def receive() -> dict:
+        line = proc.stdout.readline()
+        assert line, f"server closed stdout; stderr={proc.stderr.read().decode(errors='replace')!r}"
+        return json.loads(line)
+
+    try:
+        send(json.loads(_mcp_initialize_request()))
+        assert "protocolVersion" in receive()["result"]
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        reply = receive()
+    finally:
+        watchdog.cancel()
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    assert reply["id"] == 2
+    listed = {tool["name"] for tool in reply["result"]["tools"]}
+    assert listed == _decorated_tool_names()
 
 
 # ---------------------------------------------------------------------------

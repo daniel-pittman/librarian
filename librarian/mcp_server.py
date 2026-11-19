@@ -1,6 +1,7 @@
 """Librarian MCP server — exposes the activity database to MCP clients.
 
-This wraps the librarian CLI behind a FastMCP server so any MCP-capable client
+This wraps the librarian CLI behind an MCP server (``MCPServer`` on mcp 2.x,
+``FastMCP`` on mcp 1.x) so any MCP-capable client
 (Claude Code, etc.) can search and mutate the database without copy/pasting
 context between sessions.
 
@@ -44,7 +45,9 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _VENV_DIR = _REPO_ROOT / ".venv"
 _VENV_PY = _VENV_DIR / "bin" / "python3"
-_VENV_DEPS = ("pyyaml", "mcp")
+# Keep the mcp range in step with pyproject.toml: an unpinned ``mcp`` here
+# installs whatever major is newest, which is how mcp 2.x broke the server.
+_VENV_DEPS = ("pyyaml", "mcp>=1.0,<3")
 _MIN_PY = (3, 10)  # the `mcp` package requires >= 3.10
 
 
@@ -121,7 +124,14 @@ if __name__ == "__main__":
         __package__ = "librarian"
     _bootstrap_venv()
 
-from mcp.server.fastmcp import FastMCP  # noqa: E402
+# mcp 2.x renamed FastMCP to MCPServer and moved it; mcp 1.x only has the old
+# name. Accept both so an existing ``.venv`` built on 1.x keeps working after
+# a pull, while fresh installs get 2.x. The constructor arguments and the
+# ``tool``/``resource`` decorators used below are the same on both majors.
+try:
+    from mcp.server.mcpserver import MCPServer  # noqa: E402
+except ModuleNotFoundError:
+    from mcp.server.fastmcp import FastMCP as MCPServer  # noqa: E402
 
 from .paths import resolve_paths  # noqa: E402
 
@@ -155,7 +165,7 @@ Workflow rules:
    schema with `librarian_schema`.
 """
 
-mcp = FastMCP("librarian", instructions=INSTRUCTIONS)
+mcp = MCPServer("librarian", instructions=INSTRUCTIONS)
 
 
 def _run_cli(
