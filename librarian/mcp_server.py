@@ -1,6 +1,7 @@
 """Librarian MCP server — exposes the activity database to MCP clients.
 
-This wraps the librarian CLI behind a FastMCP server so any MCP-capable client
+This wraps the librarian CLI behind an MCP server (``MCPServer`` on mcp 2.x,
+``FastMCP`` on mcp 1.x) so any MCP-capable client
 (Claude Code, etc.) can search and mutate the database without copy/pasting
 context between sessions.
 
@@ -44,7 +45,9 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _VENV_DIR = _REPO_ROOT / ".venv"
 _VENV_PY = _VENV_DIR / "bin" / "python3"
-_VENV_DEPS = ("pyyaml", "mcp")
+# Keep the mcp range in step with pyproject.toml: an unpinned ``mcp`` here
+# installs whatever major is newest, which is how mcp 2.x broke the server.
+_VENV_DEPS = ("pyyaml", "mcp>=1.0,<3")
 _MIN_PY = (3, 10)  # the `mcp` package requires >= 3.10
 
 
@@ -121,7 +124,21 @@ if __name__ == "__main__":
         __package__ = "librarian"
     _bootstrap_venv()
 
-from mcp.server.fastmcp import FastMCP  # noqa: E402
+# mcp 2.x renamed FastMCP to MCPServer and moved it; mcp 1.x only has the old
+# name. Accept both so an existing ``.venv`` built on 1.x keeps working after
+# a pull, while fresh installs get 2.x. The constructor arguments and the
+# ``tool``/``resource`` decorators used below are the same on both majors.
+# Fall back only when the 2.x module itself is absent: a missing dependency
+# of an installed 2.x (or a missing ``mcp``) must surface as itself, not as a
+# confusing "No module named 'mcp.server.fastmcp'".
+try:
+    from mcp.server.mcpserver import MCPServer  # noqa: E402
+    from mcp.server.mcpserver.exceptions import ToolError  # noqa: E402
+except ModuleNotFoundError as exc:
+    if exc.name != "mcp.server.mcpserver":
+        raise
+    from mcp.server.fastmcp import FastMCP as MCPServer  # noqa: E402
+    from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
 
 from .paths import resolve_paths  # noqa: E402
 
@@ -155,7 +172,7 @@ Workflow rules:
    schema with `librarian_schema`.
 """
 
-mcp = FastMCP("librarian", instructions=INSTRUCTIONS)
+mcp = MCPServer("librarian", instructions=INSTRUCTIONS)
 
 
 def _run_cli(
@@ -185,18 +202,28 @@ def _run_cli(
     }
 
 
+class InvalidLabelError(ToolError, ValueError):
+    """A malformed ``session_label``.
+
+    It must be a ``ToolError``: mcp 2.x sends a client the message of a
+    ``ToolError`` only, and replaces any other exception with a bare "Error
+    executing tool <name>", which would hide how to fix the label. It is also
+    a ``ValueError`` so direct Python callers can keep catching that.
+    """
+
+
 def _validate_label(label: str) -> str:
-    """Validate a session label. Raise ValueError on malformed input."""
+    """Validate a session label. Raise InvalidLabelError on malformed input."""
     if not isinstance(label, str) or not label.strip():
-        raise ValueError(
+        raise InvalidLabelError(
             "session_label is required and must be non-empty. "
             "Format: <context>:<short-purpose>, e.g. 'cli:demo-prep'"
         )
     label = label.strip()
     if any(ch.isspace() for ch in label):
-        raise ValueError("session_label may not contain whitespace")
+        raise InvalidLabelError("session_label may not contain whitespace")
     if len(label) > 120:
-        raise ValueError("session_label must be 120 characters or fewer")
+        raise InvalidLabelError("session_label must be 120 characters or fewer")
     return label
 
 

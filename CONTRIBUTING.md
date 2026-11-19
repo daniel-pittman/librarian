@@ -61,3 +61,5 @@ open a public issue — follow `SECURITY.md` instead.
 - `develop` — integration branch for upcoming work.
 
 Open pull requests against `develop` unless a maintainer directs otherwise.
+
+The Claude review runs on every pull request; see the workflows in `.github/workflows/`. Only comments from people with write access to this repository reach the review, and only they can start the `@claude` bot.

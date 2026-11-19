@@ -38,7 +38,7 @@ librarian/
   core.py          schema-agnostic analysis: filtering, aggregation (rollup),
                    similarity, scanners
   cli.py           argparse command dispatch — the `librarian` entry point
-  mcp_server.py    FastMCP server wrapping the CLI; self-bootstraps .venv
+  mcp_server.py    MCP server (MCPServer on mcp 2.x) wrapping the CLI; self-bootstraps .venv
 schemas/           five bundled example schemas
 agents/            a generic AI-agent definition template
 tests/             pytest suite + synthetic fixture corpus
