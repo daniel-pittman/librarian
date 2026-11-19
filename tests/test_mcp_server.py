@@ -119,11 +119,15 @@ def test_server_lists_tools_over_stdio(tmp_path):
     writing every message and closing at once loses the ``tools/list`` reply.
     """
     env = {**os.environ, "LIBRARIAN_HOME": str(tmp_path), "LIBRARIAN_MEMORY_DIR": ""}
+    # stderr goes to a file, not a pipe: nothing reads a pipe during the
+    # session, so a chatty server could fill it and block.
+    stderr_path = tmp_path / "server-stderr.txt"
+    stderr_file = stderr_path.open("wb")
     proc = subprocess.Popen(
         [sys.executable, str(_SERVER_SCRIPT)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=stderr_file,
         env=env,
     )
     # readline() has no timeout; killing the server closes stdout, so a hung
@@ -137,7 +141,7 @@ def test_server_lists_tools_over_stdio(tmp_path):
 
     def receive() -> dict:
         line = proc.stdout.readline()
-        assert line, f"server closed stdout; stderr={proc.stderr.read().decode(errors='replace')!r}"
+        assert line, f"server closed stdout; stderr={stderr_path.read_bytes()!r}"
         return json.loads(line)
 
     try:
@@ -148,15 +152,40 @@ def test_server_lists_tools_over_stdio(tmp_path):
         reply = receive()
     finally:
         watchdog.cancel()
-        proc.stdin.close()
+        # A server that died early leaves unflushed bytes that make close()
+        # raise again; the child must still be reaped.
+        try:
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
         try:
             proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+        stderr_file.close()
     assert reply["id"] == 2
     listed = {tool["name"] for tool in reply["result"]["tools"]}
     assert listed == _decorated_tool_names()
+
+
+@pytest.mark.parametrize(
+    "label, reason",
+    [
+        ("", "must be non-empty"),
+        ("has space", "may not contain whitespace"),
+        ("x" * 121, "120 characters or fewer"),
+    ],
+)
+def test_bad_session_label_reason_reaches_the_client(label, reason):
+    """A rejected label's reason must survive the MCP layer. mcp 2.x passes a
+    ``ToolError``'s message to the client and replaces any other exception
+    with a bare "Error executing tool <name>", which would leave an agent no
+    way to learn the label format."""
+    arguments = {"entry_id": "x", "tags": ["a"], "session_label": label}
+    with pytest.raises(mcp_server.ToolError) as caught:
+        asyncio.run(mcp_server.mcp.call_tool("librarian_add_tags", arguments))
+    assert reason in str(caught.value)
 
 
 # ---------------------------------------------------------------------------

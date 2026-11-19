@@ -128,10 +128,17 @@ if __name__ == "__main__":
 # name. Accept both so an existing ``.venv`` built on 1.x keeps working after
 # a pull, while fresh installs get 2.x. The constructor arguments and the
 # ``tool``/``resource`` decorators used below are the same on both majors.
+# Fall back only when the 2.x module itself is absent: a missing dependency
+# of an installed 2.x (or a missing ``mcp``) must surface as itself, not as a
+# confusing "No module named 'mcp.server.fastmcp'".
 try:
     from mcp.server.mcpserver import MCPServer  # noqa: E402
-except ModuleNotFoundError:
+    from mcp.server.mcpserver.exceptions import ToolError  # noqa: E402
+except ModuleNotFoundError as exc:
+    if exc.name != "mcp.server.mcpserver":
+        raise
     from mcp.server.fastmcp import FastMCP as MCPServer  # noqa: E402
+    from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
 
 from .paths import resolve_paths  # noqa: E402
 
@@ -195,18 +202,28 @@ def _run_cli(
     }
 
 
+class InvalidLabelError(ToolError, ValueError):
+    """A malformed ``session_label``.
+
+    It must be a ``ToolError``: mcp 2.x sends a client the message of a
+    ``ToolError`` only, and replaces any other exception with a bare "Error
+    executing tool <name>", which would hide how to fix the label. It is also
+    a ``ValueError`` so direct Python callers can keep catching that.
+    """
+
+
 def _validate_label(label: str) -> str:
-    """Validate a session label. Raise ValueError on malformed input."""
+    """Validate a session label. Raise InvalidLabelError on malformed input."""
     if not isinstance(label, str) or not label.strip():
-        raise ValueError(
+        raise InvalidLabelError(
             "session_label is required and must be non-empty. "
             "Format: <context>:<short-purpose>, e.g. 'cli:demo-prep'"
         )
     label = label.strip()
     if any(ch.isspace() for ch in label):
-        raise ValueError("session_label may not contain whitespace")
+        raise InvalidLabelError("session_label may not contain whitespace")
     if len(label) > 120:
-        raise ValueError("session_label must be 120 characters or fewer")
+        raise InvalidLabelError("session_label must be 120 characters or fewer")
     return label
 
 
