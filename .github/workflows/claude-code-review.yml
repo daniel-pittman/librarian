@@ -574,7 +574,10 @@ jobs:
             Read the file ./REVIEW.md in the repository — it is an automated code review of this
             pull request. Your ONLY task is to report its merge verdict. Count the findings the
             review itself rates HIGH or CRITICAL severity (a "CI Tests" FAILURE called out in the
-            review also counts). Do NOT re-judge the diff, do NOT add findings of your own, and do
+            review also counts). The review also restates the Semgrep scan's and the CI's own
+            results, for example "Semgrep reported 11 findings (5 HIGH, 6 MEDIUM)"; those are
+            scanner counts over the whole repository, not findings of the review, so never count
+            them. When the review says it has no findings, return PASS with count=0. Do NOT re-judge the diff, do NOT add findings of your own, and do
             NOT count MEDIUM/LOW findings, missing-test notes, or anything the review did not label
             HIGH/CRITICAL. Return verdict="PASS" with count=0 when the review has zero HIGH/CRITICAL
             findings; otherwise verdict="BLOCK" with count set to the number of HIGH/CRITICAL findings.
