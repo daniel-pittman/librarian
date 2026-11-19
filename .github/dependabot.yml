@@ -7,8 +7,13 @@
 # Treat Dependabot PRs like any other: let CI run, review the bump, merge if green.
 
 version: 2
+# Every ecosystem waits 7 days after a release before Dependabot proposes it
+# (cooldown): a compromised or mistaken release is usually caught within days.
+# Security updates are not delayed.
 updates:
   - package-ecosystem: "github-actions"
+    cooldown:
+      default-days: 7
     directory: "/"
     schedule:
       interval: "weekly"
@@ -17,6 +22,8 @@ updates:
         patterns: ["*"]
 
   - package-ecosystem: "pip"
+    cooldown:
+      default-days: 7
     directory: "/"
     schedule:
       interval: "weekly"
